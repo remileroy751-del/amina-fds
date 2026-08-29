@@ -4,7 +4,9 @@
 > to open database file` qui pouvait survenir après installation de
 > l'exécutable (la base de données est maintenant stockée dans le dossier
 > personnel de l'utilisateur, voir §4bis) + saisie du nom des produits
-> désormais automatiquement capitalisée (première lettre en majuscule).
+> désormais automatiquement capitalisée (première lettre en majuscule) +
+> **vrai installateur Windows** (`AMINA_FDS_Setup.exe`) avec raccourci
+> créé automatiquement sur le Bureau et désinstalleur (voir §4).
 
 Application de bureau (Windows) pour la gestion du stock, des ventes et des
 rapports de **AMINA FDS**, spécialisée dans la production et la vente de
@@ -20,7 +22,10 @@ poudre de marbre et de ses dérivés.
 | `requirements.txt`                | Liste des librairies Python nécessaires                           |
 | `1_installer.bat`                 | Installe automatiquement tout ce qu'il faut (à faire une fois)    |
 | `2_lancer_AMINA_FDS.bat`          | Lance l'application au quotidien                                  |
-| `3_creer_executable_exe.bat`      | (Optionnel) Transforme le logiciel en un vrai fichier `.exe`      |
+| `3_creer_executable_exe.bat`      | Étape 1/2 : transforme le logiciel en fichier `.exe` brut          |
+| `4_creer_installateur.bat`        | Étape 2/2 : fabrique le vrai installateur Windows (`Setup.exe`)   |
+| `installer/setup.iss`             | Script Inno Setup qui décrit l'installateur                       |
+| `installer/app_icon.ico`          | Icône du logiciel (utilisée par l'exe, les raccourcis, l'installeur) |
 | `assets/logo.jpg`                 | Logo AMINA FDS (affiché pendant la configuration et sur le tableau de bord) |
 | `assets/mur.jpg`                  | Image des murs peints, utilisée comme décoration de l'application |
 | `anima_fds.db`                   | Base de données (créée automatiquement, voir §4bis ci-dessous)    |
@@ -42,13 +47,39 @@ poudre de marbre et de ses dérivés.
 
 Double-cliquez simplement sur **`2_lancer_AMINA_FDS.bat`** pour ouvrir le logiciel.
 
-## 4. (Optionnel) Créer un exécutable .exe autonome
+## 4. Créer un vrai installateur Windows (recommandé pour vos clients/utilisateurs)
 
-Si vous voulez un fichier `.exe` unique (sans avoir besoin d'ouvrir de fichier `.bat`
-ni de voir de fenêtre noire), double-cliquez sur **`3_creer_executable_exe.bat`**.
-Une fois terminé, vous trouverez `AMINA_FDS.exe` dans le dossier `dist`.
-Vous pouvez le copier sur le Bureau et créer un raccourci — c'est ce fichier
-que vos utilisateurs lanceront ensuite au quotidien.
+Pour donner à vos utilisateurs un **vrai logiciel qui s'installe** (comme
+n'importe quel programme Windows : assistant d'installation, choix du
+dossier, raccourci créé automatiquement sur le **Bureau**, entrée dans le
+**menu Démarrer**, et désinstalleur propre dans *Paramètres > Applications*),
+suivez ces deux étapes, dans l'ordre :
+
+**Étape 1 — Fabriquer l'exécutable brut**
+Double-cliquez sur **`3_creer_executable_exe.bat`**. Cela crée
+`dist\AMINA_FDS.exe` (ce fichier seul, s'il est lancé directement, ouvre
+juste le logiciel — il ne s'"installe" pas, c'est normal, ce n'est qu'une
+étape intermédiaire).
+
+**Étape 2 — Fabriquer l'installateur**
+Double-cliquez sur **`4_creer_installateur.bat`**.
+- Si c'est la première fois, ce script vous demandera d'installer
+  **Inno Setup** (logiciel gratuit) depuis https://jrsoftware.org/isdl.php
+  — installez-le avec les options par défaut, puis relancez le script.
+- Le résultat final est le fichier **`installer\Output\AMINA_FDS_Setup.exe`**.
+
+**C'est ce fichier `AMINA_FDS_Setup.exe` qu'il faut distribuer.** Quand un
+utilisateur le lance :
+1. Un véritable assistant d'installation Windows s'affiche (en français).
+2. Le logiciel est installé dans `Program Files\AMINA_FDS`.
+3. Une case cochée par défaut crée **automatiquement un raccourci sur le
+   Bureau**, ainsi qu'un raccourci dans le menu Démarrer.
+4. Un désinstalleur est ajouté dans *Paramètres > Applications* (Windows),
+   permettant de retirer le logiciel proprement.
+
+> 💡 Vous pouvez aussi obtenir ce même fichier `AMINA_FDS_Setup.exe`
+> automatiquement, sans rien installer sur votre PC, grâce à GitHub Actions
+> (voir §4ter ci-dessous).
 
 ## 4bis. Emplacement des données (important)
 
@@ -84,28 +115,35 @@ C:\Users\<votre_nom>\AppData\Roaming\AMINA_FDS\rapports\
 ## 4ter. Compilation automatique sur GitHub (CI/CD)
 
 Ce dépôt contient un workflow **GitHub Actions** (`.github/workflows/build.yml`)
-qui compile automatiquement `AMINA_FDS.exe` sur une machine Windows fournie
-gratuitement par GitHub, sans que tu aies besoin d'installer Python ou
-PyInstaller sur ton propre ordinateur.
+qui fabrique automatiquement le **véritable installateur**
+`AMINA_FDS_Setup.exe` (celui avec raccourci Bureau automatique, pas juste
+l'exe brut) sur une machine Windows fournie gratuitement par GitHub, sans que
+tu aies besoin d'installer Python, PyInstaller ou Inno Setup sur ton propre
+ordinateur.
 
 **Comment ça marche :**
 
 1. Crée un dépôt GitHub et pousse (`git push`) tout ce dossier dedans
-   (branche `main`).
+   (branche `main`), en incluant bien le dossier `installer/`.
 2. Va dans l'onglet **Actions** du dépôt sur GitHub.com.
-3. Le workflow **"Compiler AMINA_FDS.exe"** se lance automatiquement :
+3. Le workflow **"Compiler l'installateur AMINA_FDS"** se lance
+   automatiquement :
    - à chaque `git push` sur `main` ;
    - ou manuellement via le bouton **"Run workflow"** ;
    - ou automatiquement en créant un tag de version, ex. `v1.0` (
      `git tag v1.0 && git push origin v1.0`) — dans ce cas, GitHub crée
-     en plus une **Release** avec `AMINA_FDS.exe` prêt à télécharger.
+     en plus une **Release** avec `AMINA_FDS_Setup.exe` prêt à télécharger.
 4. Une fois le workflow terminé (icône verte ✔), clique dessus puis va
-   dans **Artifacts** en bas de page : télécharge `AMINA_FDS_windows.zip`,
-   qui contient `AMINA_FDS.exe` + le dossier `assets`.
+   dans **Artifacts** en bas de page : télécharge `AMINA_FDS_Setup`, qui
+   contient `AMINA_FDS_Setup.exe` — le vrai installateur, prêt à distribuer
+   tel quel.
 
 > Aucune donnée sensible n'est nécessaire : le workflow utilise uniquement
 > le jeton `GITHUB_TOKEN` fourni automatiquement par GitHub pour publier la
+> Release.
+
 ---
+
 
 ## 5. Premier lancement — Configuration initiale
 

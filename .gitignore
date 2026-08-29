@@ -7,6 +7,9 @@ build/
 dist/
 *.spec
 
+# Sortie de l'installateur Inno Setup (générée automatiquement)
+installer/Output/
+
 # Base de données locale (ne doit pas être versionnée)
 anima_fds.db
 *.db
