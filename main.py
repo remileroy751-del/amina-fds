@@ -30,18 +30,40 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DB_PATH = os.path.join(BASE_DIR, "anima_fds.db")
+# ------------------------------------------------------------------
+# DOSSIER DE DONNEES (base de données + rapports exportés)
+# ------------------------------------------------------------------
+# On n'écrit JAMAIS à côté de l'exécutable : si le logiciel est installé
+# dans "Program Files" (ou tout autre dossier protégé), Windows refuse
+# l'écriture pour un utilisateur normal et sqlite lève l'erreur
+# "unable to open database file". On utilise donc toujours un dossier
+# appartenant à l'utilisateur (%APPDATA% sous Windows, ~/.amina_fds ailleurs).
+def _get_data_dir():
+    if sys.platform.startswith("win"):
+        root = os.environ.get("APPDATA") or os.path.expanduser("~")
+        data_dir = os.path.join(root, "AMINA_FDS")
+    else:
+        data_dir = os.path.join(os.path.expanduser("~"), ".amina_fds")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except Exception:
+        # Dernier recours : dossier de l'utilisateur directement
+        data_dir = os.path.expanduser("~")
+    return data_dir
+
+
+DATA_DIR = _get_data_dir()
+DB_PATH = os.path.join(DATA_DIR, "anima_fds.db")
+RAPPORTS_DIR = os.path.join(DATA_DIR, "rapports")
+try:
+    os.makedirs(RAPPORTS_DIR, exist_ok=True)
+except Exception:
+    RAPPORTS_DIR = DATA_DIR
+
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.jpg")
 MUR_PATH = os.path.join(ASSETS_DIR, "mur.jpg")
 TVA_TAUX = 0.18
-
-# ------------------------------------------------------------------
-# PERIODE D'ESSAI
-# ------------------------------------------------------------------
-ESSAI_NB_JOURS = 7
-# Hash SHA-256 du code de déverrouillage (le code en clair n'apparaît jamais dans le code source)
-CODE_DEVERROUILLAGE_HASH = "cab96e5dc35bafa25db541e7f7707323abcecbb98d592e3b8f243d06bb83ee53"
 
 COLOR_PRIMARY = "#7a4a2b"      # marron marbre/terre
 COLOR_PRIMARY_DARK = "#5c3720"
@@ -144,7 +166,15 @@ def load_side_texture(width=210, height=140):
 # ------------------------------------------------------------------
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+    except sqlite3.OperationalError:
+        # Dernier recours si le dossier utilisateur n'est pas accessible :
+        # on retombe sur un fichier dans le dossier temporaire système.
+        import tempfile
+        fallback = os.path.join(tempfile.gettempdir(), "anima_fds.db")
+        conn = sqlite3.connect(fallback)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -231,11 +261,6 @@ def init_db():
         cloturee_par TEXT,
         date_cloture TEXT
     )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS licence (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        date_installation TEXT,
-        debloquee INTEGER DEFAULT 0
-    )""")
     conn.commit()
     conn.close()
 
@@ -267,59 +292,22 @@ def is_configured():
     return bool(row and row["configured"] == 1)
 
 
-# ------------------------------------------------------------------
-# GESTION DE LA PERIODE D'ESSAI
-# ------------------------------------------------------------------
-def get_licence_row():
-    """Crée (si besoin) et retourne la ligne licence, en fixant la date d'installation
-    lors du tout premier lancement de l'application."""
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM licence WHERE id=1").fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO licence (id, date_installation, debloquee) VALUES (1, ?, 0)",
-            (today_str(),))
-        conn.commit()
-        row = conn.execute("SELECT * FROM licence WHERE id=1").fetchone()
-    conn.close()
-    return row
-
-
-def jours_ecoules_depuis_installation():
-    row = get_licence_row()
-    try:
-        d_install = datetime.strptime(row["date_installation"], "%Y-%m-%d")
-    except Exception:
-        d_install = datetime.now()
-    return (datetime.now() - d_install).days
-
-
-def licence_est_valide():
-    """Retourne True si l'application peut être utilisée : période d'essai encore
-    en cours, ou code de déverrouillage déjà saisi avec succès."""
-    row = get_licence_row()
-    if row["debloquee"] == 1:
-        return True
-    return jours_ecoules_depuis_installation() < ESSAI_NB_JOURS
-
-
-def tenter_deverrouillage(code):
-    """Vérifie le code saisi ; si correct, débloque définitivement l'application."""
-    if hash_pwd(code.strip()) != CODE_DEVERROUILLAGE_HASH:
-        return False
-    conn = get_conn()
-    conn.execute("UPDATE licence SET debloquee=1 WHERE id=1")
-    conn.commit()
-    conn.close()
-    return True
-
-
 def is_journee_cloturee(date_jour=None):
     date_jour = date_jour or today_str()
     conn = get_conn()
     row = conn.execute("SELECT cloturee FROM journees WHERE date_jour=?", (date_jour,)).fetchone()
     conn.close()
     return bool(row and row["cloturee"] == 1)
+
+
+def capitaliser_nom(nom):
+    """Met en majuscule la première lettre du nom du produit, sans toucher
+    au reste (permet de saisir en minuscule sans casser un nom déjà correct,
+    des sigles, etc.)."""
+    nom = (nom or "").strip()
+    if not nom:
+        return nom
+    return nom[0].upper() + nom[1:]
 
 
 def log_mouvement(type_produit, produit_nom, quantite, action, utilisateur):
@@ -469,14 +457,6 @@ class AnimaApp(tk.Tk):
 
         init_db()
 
-        self.demarrer()
-
-    def demarrer(self):
-        """Point d'entrée après le contrôle de licence : lance la configuration
-        initiale ou l'écran de connexion selon l'état de l'application."""
-        if not licence_est_valide():
-            self.show_frame(TrialLockFrame)
-            return
         if not is_configured():
             self.show_frame(WelcomeConfigFrame)
         else:
@@ -494,56 +474,6 @@ class AnimaApp(tk.Tk):
     def logout(self):
         self.session = {"pseudo": None, "level": None}
         self.show_frame(LoginFrame)
-
-
-# ------------------------------------------------------------------
-# ECRAN DE VERROUILLAGE (PERIODE D'ESSAI EXPIREE)
-# ------------------------------------------------------------------
-class TrialLockFrame(tk.Frame):
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=COLOR_BG)
-        self.app = app
-
-        card = tk.Frame(self, bg="white", padx=50, pady=40, highlightbackground=COLOR_ACCENT, highlightthickness=2)
-        card.place(relx=0.5, rely=0.5, anchor="center")
-
-        logo = load_logo(110)
-        if logo:
-            lbl_logo = tk.Label(card, image=logo, bg="white")
-            lbl_logo.image = logo
-            lbl_logo.pack(pady=(0, 15))
-        else:
-            tk.Label(card, text="AMINA FDS", font=("Segoe UI", 24, "bold"), fg=COLOR_PRIMARY, bg="white").pack(pady=(0, 5))
-
-        tk.Label(card, text="Période d'essai terminée", font=FONT_TITLE, bg="white", fg=COLOR_DANGER).pack(pady=(5, 10))
-        tk.Label(card, text=f"La période d'essai gratuite de {ESSAI_NB_JOURS} jours de ce logiciel est arrivée à\n"
-                             "son terme. Veuillez saisir le code de déverrouillage fourni par\n"
-                             "Ecom-Academy pour continuer à utiliser l'application.",
-                 font=FONT_NORMAL, bg="white", justify="center").pack(pady=(0, 20))
-
-        tk.Label(card, text="Code de déverrouillage", font=FONT_BOLD, bg="white", fg=COLOR_PRIMARY_DARK).pack()
-        self.code_var = tk.StringVar()
-        entry = ttk.Entry(card, textvariable=self.code_var, show="*", width=28, justify="center")
-        entry.pack(pady=(8, 20))
-        entry.bind("<Return>", lambda e: self.valider())
-        entry.focus_set()
-
-        ttk.Button(card, text="Déverrouiller", style="Primary.TButton", command=self.valider).pack(ipadx=20, ipady=4)
-
-        tk.Label(card, text="Application créée par Ecom Academy. Contactez-nous sur WhatsApp +22899373635",
-                 font=("Segoe UI", 8), bg="white", fg="#777").pack(pady=(25, 0))
-
-    def valider(self):
-        code = self.code_var.get()
-        if not code:
-            messagebox.showerror("Erreur", "Veuillez saisir un code de déverrouillage.")
-            return
-        if tenter_deverrouillage(code):
-            messagebox.showinfo("Succès", "Application déverrouillée. Merci pour votre confiance !")
-            self.app.demarrer()
-        else:
-            messagebox.showerror("Code incorrect", "Le code de déverrouillage saisi est incorrect.")
-            self.code_var.set("")
 
 
 # ------------------------------------------------------------------
@@ -712,7 +642,7 @@ class StockInitFrame(tk.Frame):
         self.refresh_list()
 
     def enregistrer(self):
-        nom = self.nom_var.get().strip()
+        nom = capitaliser_nom(self.nom_var.get())
         if not nom:
             messagebox.showerror("Erreur", "Le nom du produit est obligatoire.")
             return
@@ -1081,7 +1011,7 @@ class StockFrame(BaseSidebarFrame):
             messagebox.showerror("Erreur", "La journée est clôturée.")
             return
         tc = self.type_code()
-        nouveau_nom = self.nouveau_var.get().strip()
+        nouveau_nom = capitaliser_nom(self.nouveau_var.get())
         table = TYPES_PRODUITS[tc]
         try:
             qte = float(self.qte_var.get().replace(",", "."))
@@ -1796,7 +1726,7 @@ class RapportFrame(BaseSidebarFrame):
         except ImportError:
             messagebox.showerror("Erreur", "Le module reportlab n'est pas installé.")
             return
-        path = os.path.join(BASE_DIR, f"rapport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+        path = os.path.join(RAPPORTS_DIR, f"rapport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
         cvs = canvas.Canvas(path, pagesize=A4)
         w, h = A4
         y = h - 60
@@ -1852,7 +1782,7 @@ class RapportFrame(BaseSidebarFrame):
         ws.append(["N° Facture", "Client", "Téléphone", "Total"])
         for f in data["factures"]:
             ws.append([f["numero"], f["client_nom"], f["client_tel"], f["total"]])
-        path = os.path.join(BASE_DIR, f"rapport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        path = os.path.join(RAPPORTS_DIR, f"rapport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         wb.save(path)
         messagebox.showinfo("Export réussi", f"Rapport Excel exporté :\n{path}")
 

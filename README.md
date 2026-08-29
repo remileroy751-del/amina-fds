@@ -1,5 +1,11 @@
 # AMINA FDS — Logiciel de Gestion de Stock
 
+> **Mise à jour** : correction de l'erreur `sqlite3.OperationalError: unable
+> to open database file` qui pouvait survenir après installation de
+> l'exécutable (la base de données est maintenant stockée dans le dossier
+> personnel de l'utilisateur, voir §4bis) + saisie du nom des produits
+> désormais automatiquement capitalisée (première lettre en majuscule).
+
 Application de bureau (Windows) pour la gestion du stock, des ventes et des
 rapports de **AMINA FDS**, spécialisée dans la production et la vente de
 poudre de marbre et de ses dérivés.
@@ -17,10 +23,7 @@ poudre de marbre et de ses dérivés.
 | `3_creer_executable_exe.bat`      | (Optionnel) Transforme le logiciel en un vrai fichier `.exe`      |
 | `assets/logo.jpg`                 | Logo AMINA FDS (affiché pendant la configuration et sur le tableau de bord) |
 | `assets/mur.jpg`                  | Image des murs peints, utilisée comme décoration de l'application |
-| `assets/icon.ico`                 | Icône du logiciel (utilisée par l'exécutable et l'installateur)   |
-| `installer.iss`                   | Script Inno Setup qui génère l'installateur Windows (icône Bureau) |
-| `.github/workflows/build.yml`     | Workflow GitHub Actions : compile automatiquement l'exécutable et l'installateur |
-| `anima_fds.db`                   | Base de données (créée automatiquement au premier lancement)      |
+| `anima_fds.db`                   | Base de données (créée automatiquement, voir §4bis ci-dessous)    |
 
 > ⚠️ Le dossier **`assets`** doit toujours rester à côté de `main.py` (ou de
 > `AMINA_FDS.exe` une fois compilé). S'il est absent, le logiciel fonctionne
@@ -47,10 +50,34 @@ Une fois terminé, vous trouverez `AMINA_FDS.exe` dans le dossier `dist`.
 Vous pouvez le copier sur le Bureau et créer un raccourci — c'est ce fichier
 que vos utilisateurs lanceront ensuite au quotidien.
 
-> Important : la base de données `anima_fds.db` doit toujours rester dans le
-> même dossier que le programme (`main.py` ou `AMINA_FDS.exe`), car c'est là
-> que sont enregistrées toutes vos données (stocks, factures, rapports...).
-> Pensez à faire une copie régulière de ce fichier pour une sauvegarde.
+## 4bis. Emplacement des données (important)
+
+Pour que le logiciel fonctionne **quel que soit l'endroit où il est installé**
+(y compris dans `Program Files`, qui est protégé en écriture pour les
+utilisateurs normaux), la base de données **n'est pas stockée à côté de
+l'exécutable**. Elle est automatiquement créée dans le dossier personnel de
+l'utilisateur Windows :
+
+```
+%APPDATA%\AMINA_FDS\anima_fds.db
+```
+
+soit généralement :
+
+```
+C:\Users\<votre_nom>\AppData\Roaming\AMINA_FDS\anima_fds.db
+```
+
+Les rapports exportés (PDF / Excel) sont quant à eux enregistrés dans :
+
+```
+C:\Users\<votre_nom>\AppData\Roaming\AMINA_FDS\rapports\
+```
+
+> Pensez à faire une copie régulière du dossier `AMINA_FDS` (dans
+> `AppData\Roaming`) pour sauvegarder vos données. Vous pouvez accéder
+> rapidement à ce dossier en collant `%APPDATA%\AMINA_FDS` dans la barre
+> d'adresse de l'explorateur Windows.
 
 ---
 
@@ -133,53 +160,8 @@ Seul le **chef (niveau 2)** peut rouvrir une journée clôturée, via
 
 ---
 
-## 11. Période d'essai gratuite (7 jours)
-
-Ce logiciel intègre une **période d'essai gratuite de 7 jours**, décomptée à
-partir de la toute première ouverture de l'application (date enregistrée
-automatiquement dans la base de données locale).
-
-- Pendant les 7 premiers jours : l'application fonctionne normalement, sans
-  aucune restriction.
-- Passé ce délai : au lancement, un écran **« Période d'essai terminée »**
-  s'affiche à la place de l'écran de connexion habituel, et demande un
-  **code de déverrouillage**.
-- Une fois le bon code saisi, l'application est **déverrouillée
-  définitivement** sur cet ordinateur (le blocage ne réapparaît plus, même
-  après la date du 7ᵉ jour).
-- Le code correct n'est jamais stocké ni affiché en clair dans le code
-  source : seule son empreinte (hash SHA-256) y figure.
-
-## 12. Compiler l'exécutable et l'installateur (GitHub Actions)
-
-Ce dépôt est prêt à être poussé tel quel sur GitHub : un workflow automatique
-(`.github/workflows/build.yml`) se charge de tout compiler dès que vous
-poussez sur la branche `main` (ou manuellement via l'onglet **Actions →
-Run workflow**).
-
-Le workflow effectue, sur une machine Windows :
-1. La compilation de `main.py` en un exécutable autonome `AMINA_FDS.exe`
-   (PyInstaller, avec l'icône `assets/icon.ico`).
-2. La génération d'un **véritable installateur** `AMINA_FDS_Setup.exe`
-   (via Inno Setup et `installer.iss`), qui installe le logiciel dans
-   `Program Files`, crée un raccourci dans le Menu Démarrer **et une icône
-   de lancement sur le Bureau** — exactement comme un logiciel commercial
-   classique.
-
-Une fois le workflow terminé, les deux fichiers (`AMINA_FDS.exe` et
-`AMINA_FDS_Setup.exe`) sont disponibles en téléchargement dans l'onglet
-**Actions** du dépôt (section *Artifacts*). Si vous poussez un tag de
-version (ex. `v1.0`), ils sont en plus automatiquement joints à une
-**Release GitHub**.
-
-C'est le fichier **`AMINA_FDS_Setup.exe`** qu'il faut envoyer au client :
-en le lançant, il installe le logiciel et dépose directement l'icône de
-lancement sur son Bureau.
-
----
-
-## 13. Support technique
+## 11. Support technique
 
 Toutes les données sont stockées localement dans le fichier `anima_fds.db`
-(base SQLite) situé dans le dossier de l'application. Pensez à en faire une
+(base SQLite) situé dans `%APPDATA%\AMINA_FDS\` (voir §4bis). Pensez à en faire une
 copie de sauvegarde régulièrement (clé USB, cloud, etc.).
