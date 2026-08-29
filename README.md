@@ -81,6 +81,32 @@ C:\Users\<votre_nom>\AppData\Roaming\AMINA_FDS\rapports\
 
 ---
 
+## 4ter. Compilation automatique sur GitHub (CI/CD)
+
+Ce dépôt contient un workflow **GitHub Actions** (`.github/workflows/build.yml`)
+qui compile automatiquement `AMINA_FDS.exe` sur une machine Windows fournie
+gratuitement par GitHub, sans que tu aies besoin d'installer Python ou
+PyInstaller sur ton propre ordinateur.
+
+**Comment ça marche :**
+
+1. Crée un dépôt GitHub et pousse (`git push`) tout ce dossier dedans
+   (branche `main`).
+2. Va dans l'onglet **Actions** du dépôt sur GitHub.com.
+3. Le workflow **"Compiler AMINA_FDS.exe"** se lance automatiquement :
+   - à chaque `git push` sur `main` ;
+   - ou manuellement via le bouton **"Run workflow"** ;
+   - ou automatiquement en créant un tag de version, ex. `v1.0` (
+     `git tag v1.0 && git push origin v1.0`) — dans ce cas, GitHub crée
+     en plus une **Release** avec `AMINA_FDS.exe` prêt à télécharger.
+4. Une fois le workflow terminé (icône verte ✔), clique dessus puis va
+   dans **Artifacts** en bas de page : télécharge `AMINA_FDS_windows.zip`,
+   qui contient `AMINA_FDS.exe` + le dossier `assets`.
+
+> Aucune donnée sensible n'est nécessaire : le workflow utilise uniquement
+> le jeton `GITHUB_TOKEN` fourni automatiquement par GitHub pour publier la
+---
+
 ## 5. Premier lancement — Configuration initiale
 
 Au tout premier démarrage, l'application vous guide automatiquement :
