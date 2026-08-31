@@ -9,7 +9,7 @@
 ; ============================================================================
 
 #define MyAppName "AMINA FDS - Gestion de Stock"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "AMINA FDS"
 #define MyAppExeName "AMINA_FDS.exe"
 

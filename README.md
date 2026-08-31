@@ -1,7 +1,15 @@
 # AMINA FDS — Logiciel de Gestion de Stock
 
-> **Mise à jour** : correction de l'erreur `sqlite3.OperationalError: unable
-> to open database file` qui pouvait survenir après installation de
+> **Mise à jour v1.1.0** : ajout du prix unitaire de vente pour les produits
+> semi-finis (désormais vendables) ; nouvel onglet **Dépenses** dédié
+> (Secrétaire + Chef) avec date modifiable, libellé et montant ; possibilité
+> pour le Chef de modifier les prix de vente des produits semi-finis/finis
+> depuis Options avancées ; tableau de bord du Chef enrichi avec le chiffre
+> d'affaires, le bénéfice brut et le bénéfice net du jour ; mise en
+> surbrillance (jaune foncé / texte noir) du bouton de menu actif.
+>
+> **Mise à jour précédente** : correction de l'erreur `sqlite3.OperationalError:
+> unable to open database file` qui pouvait survenir après installation de
 > l'exécutable (la base de données est maintenant stockée dans le dossier
 > personnel de l'utilisateur, voir §4bis) + saisie du nom des produits
 > désormais automatiquement capitalisée (première lettre en majuscule) +
@@ -222,9 +230,37 @@ toute nouvelle saisie (stock, vente, dépense) pour la journée en cours.
 Seul le **chef (niveau 2)** peut rouvrir une journée clôturée, via
 **Options avancées → Réouverture de journée**.
 
+## 11. Dépenses
+
+Le menu **Dépenses** (accessible aux niveaux 1 et 2) permet d'enregistrer
+autant de dépenses que nécessaire au cours d'une même journée :
+- **Date** : aujourd'hui par défaut, modifiable via le sélecteur 📅 ;
+- **Libellé de la dépense** (ex : carburant, réparation, achat de sacs...) ;
+- **Montant (F CFA)**.
+
+La liste et le total des dépenses de la date sélectionnée s'affichent
+juste en dessous du formulaire.
+
+## 12. Modifier les prix de vente (Chef uniquement)
+
+Depuis **Options avancées → Modifier les prix**, le chef (niveau 2) peut
+à tout moment changer le **prix unitaire de vente** d'un produit semi-fini
+ou fini déjà en stock, sans avoir à le supprimer/recréer. Le nouveau prix
+s'applique immédiatement aux ventes suivantes.
+
+## 13. Tableau de bord du Chef — indicateurs financiers du jour
+
+Sur le tableau de bord, le **chef (niveau 2)** voit en plus trois
+indicateurs mis à jour en temps réel pour la journée en cours :
+- **Chiffre d'affaires du jour** (ventes + prestations de services) ;
+- **Bénéfice brut du jour** (chiffre d'affaires − coût de revient des
+  produits semi-finis/finis vendus, au coût actuellement enregistré en
+  stock) ;
+- **Bénéfice net du jour** (bénéfice brut − dépenses de la journée).
+
 ---
 
-## 11. Support technique
+## 14. Support technique
 
 Toutes les données sont stockées localement dans le fichier `anima_fds.db`
 (base SQLite) situé dans `%APPDATA%\AMINA_FDS\` (voir §4bis). Pensez à en faire une
