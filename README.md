@@ -265,3 +265,13 @@ indicateurs mis à jour en temps réel pour la journée en cours :
 Toutes les données sont stockées localement dans le fichier `anima_fds.db`
 (base SQLite) situé dans `%APPDATA%\AMINA_FDS\` (voir §4bis). Pensez à en faire une
 copie de sauvegarde régulièrement (clé USB, cloud, etc.).
+
+
+## Mise à jour 1.2.0 — Facturation
+- Bouton **« Enregistrer la facture »** déplacé à côté de **« Ajouter au panier »**.
+- Total de la facture affiché et actualisé en temps réel dès qu'une ligne est ajoutée/retirée du panier ou que le transport/TVA change.
+- Nom du client et téléphone obligatoires ; quartier/adresse désormais facultatif.
+- Ajout du **transport à la charge du client**, facultatif, intégré au total et conservé sur la facture.
+- Montant total écrit en toutes lettres sur l'aperçu et sur les factures enregistrées.
+- Migration automatique de la base SQLite existante : les anciennes factures conservent un transport à 0 F CFA.
+- Version installateur : **1.2.0**.
