@@ -1,5 +1,8 @@
 # AMINA FDS — Logiciel de Gestion de Stock
 
+> **Mise à jour v1.2.1** : nouveau menu **Prestation de Services** avec établissement de factures multi-lignes pour les prestations d'infographie et autres services, panier, total en temps réel, TVA à 18 %, informations client et montant total en lettres. Les factures de services sont enregistrées séparément et intégrées au chiffre d'affaires.
+
+
 > **Mise à jour v1.1.0** : ajout du prix unitaire de vente pour les produits
 > semi-finis (désormais vendables) ; nouvel onglet **Dépenses** dédié
 > (Secrétaire + Chef) avec date modifiable, libellé et montant ; possibilité
@@ -267,11 +270,11 @@ Toutes les données sont stockées localement dans le fichier `anima_fds.db`
 copie de sauvegarde régulièrement (clé USB, cloud, etc.).
 
 
-## Mise à jour 1.2.0 — Facturation
+## Mise à jour 1.2.1 — Facturation
 - Bouton **« Enregistrer la facture »** déplacé à côté de **« Ajouter au panier »**.
 - Total de la facture affiché et actualisé en temps réel dès qu'une ligne est ajoutée/retirée du panier ou que le transport/TVA change.
 - Nom du client et téléphone obligatoires ; quartier/adresse désormais facultatif.
 - Ajout du **transport à la charge du client**, facultatif, intégré au total et conservé sur la facture.
 - Montant total écrit en toutes lettres sur l'aperçu et sur les factures enregistrées.
 - Migration automatique de la base SQLite existante : les anciennes factures conservent un transport à 0 F CFA.
-- Version installateur : **1.2.0**.
+- Version installateur : **1.2.1**.

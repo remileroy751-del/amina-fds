@@ -24,6 +24,7 @@ except ImportError:
 # CONFIGURATION GENERALE
 # ------------------------------------------------------------------
 APP_TITLE = "AMINA FDS - Gestion de Stock"
+APP_VERSION = "1.2.1"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -247,6 +248,30 @@ def init_db():
         montant REAL,
         utilisateur TEXT
     )""")
+    # Facturation des prestations de services (version 1.2.1).
+    # Une facture peut contenir plusieurs lignes de prestations et une TVA.
+    c.execute("""CREATE TABLE IF NOT EXISTS service_factures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero TEXT UNIQUE,
+        date_heure TEXT,
+        date_jour TEXT,
+        client_nom TEXT,
+        client_tel TEXT,
+        client_adresse TEXT,
+        total REAL,
+        utilisateur TEXT,
+        modifiee INTEGER DEFAULT 0,
+        tva_active INTEGER DEFAULT 0,
+        montant_ht REAL DEFAULT 0,
+        montant_tva REAL DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS service_facture_lignes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        facture_id INTEGER,
+        libelle TEXT,
+        montant REAL,
+        FOREIGN KEY (facture_id) REFERENCES service_factures(id)
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS facture_lignes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         facture_id INTEGER,
@@ -339,10 +364,12 @@ def get_stock(type_code):
 
 def get_prestations_total(date_debut, date_fin):
     conn = get_conn()
-    row = conn.execute("SELECT COALESCE(SUM(montant),0) as t, COUNT(*) as n FROM prestations WHERE date_jour BETWEEN ? AND ?",
-                       (date_debut, date_fin)).fetchone()
+    legacy = conn.execute("SELECT COALESCE(SUM(montant),0) as t, COUNT(*) as n FROM prestations WHERE date_jour BETWEEN ? AND ?",
+                          (date_debut, date_fin)).fetchone()
+    services = conn.execute("SELECT COALESCE(SUM(total),0) as t, COUNT(*) as n FROM service_factures WHERE date_jour BETWEEN ? AND ?",
+                            (date_debut, date_fin)).fetchone()
     conn.close()
-    return row["t"], row["n"]
+    return (legacy["t"] + services["t"], legacy["n"] + services["n"])
 
 
 def compute_journee_finances(date_jour):
@@ -381,6 +408,14 @@ def compute_journee_finances(date_jour):
         "depenses": depenses_jour,
         "benefice_net": benefice_net,
     }
+
+
+def generate_numero_service_facture():
+    prefix = "PS-" + datetime.now().strftime("%Y%m%d") + "-"
+    conn = get_conn()
+    row = conn.execute("SELECT COUNT(*) as c FROM service_factures WHERE numero LIKE ?", (prefix + "%",)).fetchone()
+    conn.close()
+    return f"{prefix}{(row['c'] if row else 0) + 1:03d}"
 
 
 def generate_numero_facture():
@@ -833,7 +868,7 @@ class DashboardFrame(tk.Frame):
         side_btn("🏠  Tableau de bord", lambda: self.app.show_frame(DashboardFrame), key="Tableau de bord")
         side_btn("📦  Stock", lambda: self.app.show_frame(StockFrame), key="Stock")
         side_btn("🧾  Vendre", lambda: self.app.show_frame(VenteFrame), key="Vendre")
-        side_btn("🛠️  Prestations de services", lambda: self.app.show_frame(PrestationFrame), key="Prestations de services")
+        side_btn("🛠️  Prestation de Services", lambda: self.app.show_frame(PrestationFrame), key="Prestation de Services")
         side_btn("💰  Dépenses", lambda: self.app.show_frame(DepenseFrame), key="Dépenses")
         side_btn("📊  Rapports", lambda: self.app.show_frame(RapportFrame), key="Rapports")
         if level == 2:
@@ -985,7 +1020,7 @@ class BaseSidebarFrame(tk.Frame):
         side_btn("🏠  Tableau de bord", lambda: self.app.show_frame(DashboardFrame), key="Tableau de bord")
         side_btn("📦  Stock", lambda: self.app.show_frame(StockFrame), key="Stock")
         side_btn("🧾  Vendre", lambda: self.app.show_frame(VenteFrame), key="Vendre")
-        side_btn("🛠️  Prestations de services", lambda: self.app.show_frame(PrestationFrame), key="Prestations de services")
+        side_btn("🛠️  Prestation de Services", lambda: self.app.show_frame(PrestationFrame), key="Prestation de Services")
         side_btn("💰  Dépenses", lambda: self.app.show_frame(DepenseFrame), key="Dépenses")
         side_btn("📊  Rapports", lambda: self.app.show_frame(RapportFrame), key="Rapports")
         if level == 2:
@@ -1141,86 +1176,341 @@ class StockFrame(BaseSidebarFrame):
 # PRESTATIONS DE SERVICES
 # ------------------------------------------------------------------
 class PrestationFrame(BaseSidebarFrame):
+    """Établissement de factures pour les prestations d'infographie/services.
+
+    Contrairement aux ventes, les prestations ne consomment aucun stock.
+    Chaque facture peut contenir plusieurs lignes de libellés + montants,
+    avec calcul HT/TVA/Total en temps réel.
+    """
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Prestations de services")
+        super().__init__(parent, app, "Prestation de Services")
+        self.app = app
+        self.panier = []
         c = self.content
 
-        tk.Label(c, text="Prestations de services", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w")
-        tk.Label(c, text="Ex: transport, installation, main d'œuvre, etc. Ce montant vient augmenter le chiffre d'affaires de la journée.",
+        tk.Label(c, text="Prestation de Services", font=FONT_TITLE, bg=COLOR_BG,
+                 fg=COLOR_PRIMARY_DARK).pack(anchor="w")
+        tk.Label(c, text="Établissez une facture de services (infographie, conception graphique, impression, etc.).",
                  font=FONT_NORMAL, bg=COLOR_BG, fg="#666").pack(anchor="w", pady=(2, 10))
 
         if is_journee_cloturee():
-            tk.Label(c, text="⚠ La journée est clôturée : aucune saisie n'est possible.", font=FONT_BOLD,
-                     bg=COLOR_BG, fg=COLOR_DANGER).pack(anchor="w", pady=5)
+            tk.Label(c, text="⚠ La journée est clôturée : aucune saisie n'est possible.",
+                     font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_DANGER).pack(anchor="w", pady=5)
 
-        form = tk.Frame(c, bg="white", padx=25, pady=20, highlightbackground=COLOR_ACCENT, highlightthickness=2)
-        form.pack(fill="x", pady=10)
+        top = tk.Frame(c, bg=COLOR_BG)
+        top.pack(fill="both", expand=True)
 
-        tk.Label(form, text="Libellé du service", font=FONT_NORMAL, bg="white").grid(row=0, column=0, sticky="w", pady=6)
+        left = tk.Frame(top, bg="white", padx=20, pady=15,
+                        highlightbackground=COLOR_ACCENT, highlightthickness=2)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        tk.Label(left, text="Saisir la prestation", font=FONT_SUBTITLE, bg="white",
+                 fg=COLOR_PRIMARY_DARK).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        tk.Label(left, text="Libellé", bg="white", font=FONT_NORMAL).grid(row=1, column=0, sticky="w", pady=5)
         self.libelle_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.libelle_var, width=35).grid(row=0, column=1, padx=10)
+        lib_entry = ttk.Entry(left, textvariable=self.libelle_var, width=38)
+        lib_entry.grid(row=1, column=1, pady=5, padx=8, sticky="ew")
+        lib_entry.bind("<Return>", lambda e: self.ajouter_panier())
 
-        tk.Label(form, text="Montant (F CFA)", font=FONT_NORMAL, bg="white").grid(row=1, column=0, sticky="w", pady=6)
+        tk.Label(left, text="Montant (F CFA)", bg="white", font=FONT_NORMAL).grid(row=2, column=0, sticky="w", pady=5)
         self.montant_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.montant_var, width=35).grid(row=1, column=1, padx=10)
+        montant_entry = ttk.Entry(left, textvariable=self.montant_var, width=22)
+        montant_entry.grid(row=2, column=1, pady=5, padx=8, sticky="w")
+        montant_entry.bind("<Return>", lambda e: self.ajouter_panier())
 
         state = "disabled" if is_journee_cloturee() else "normal"
-        ttk.Button(form, text="Enregistrer", state=state, command=self.enregistrer).grid(row=2, column=0, columnspan=2, pady=(15, 0), ipadx=10)
+        btn_frame = tk.Frame(left, bg="white")
+        btn_frame.grid(row=3, column=0, columnspan=3, sticky="w", pady=12)
+        ttk.Button(btn_frame, text="➕ Ajouter au panier", command=self.ajouter_panier,
+                   state=state).pack(side="left", padx=(0, 8), ipadx=8)
+        ttk.Button(btn_frame, text="🧾 Enregistrer la facture", style="Primary.TButton",
+                   command=self.enregistrer_facture, state=state).pack(side="left", ipadx=8)
 
-        tk.Label(c, text="Prestations enregistrées aujourd'hui", font=FONT_SUBTITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(15, 5))
-        self.tree = ttk.Treeview(c, columns=("heure", "libelle", "montant", "user"), show="headings", height=10)
-        headers = {"heure": "Heure", "libelle": "Libellé", "montant": "Montant (F CFA)", "user": "Saisi par"}
-        for cc in ("heure", "libelle", "montant", "user"):
-            self.tree.heading(cc, text=headers[cc])
-            self.tree.column(cc, anchor="center")
-        self.tree.pack(fill="both", expand=True)
+        tk.Label(left, text="Panier des prestations", font=FONT_SUBTITLE, bg="white",
+                 fg=COLOR_PRIMARY_DARK).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 5))
+        self.panier_tree = ttk.Treeview(left, columns=("libelle", "montant"), show="headings", height=8)
+        self.panier_tree.heading("libelle", text="Libellé")
+        self.panier_tree.heading("montant", text="Montant (F CFA)")
+        self.panier_tree.column("libelle", width=380, anchor="w")
+        self.panier_tree.column("montant", width=150, anchor="center")
+        self.panier_tree.grid(row=5, column=0, columnspan=3, sticky="nsew")
 
-        total_frame = tk.Frame(c, bg=COLOR_BG)
-        total_frame.pack(fill="x", pady=(10, 0))
-        self.total_lbl = tk.Label(total_frame, text="", font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_PRIMARY)
-        self.total_lbl.pack(anchor="e")
+        ttk.Button(left, text="🗑 Retirer la ligne sélectionnée", command=self.retirer_ligne,
+                   state=state).grid(row=6, column=0, columnspan=3, pady=8)
 
-        self.refresh()
+        self.total_live_var = tk.StringVar(value="TOTAL À PAYER : 0 F CFA")
+        tk.Label(left, textvariable=self.total_live_var, font=("Segoe UI", 16, "bold"),
+                 bg="white", fg=COLOR_PRIMARY_DARK).grid(row=7, column=0, columnspan=3,
+                                                            sticky="e", pady=(6, 4))
+        self.tva_live_var = tk.StringVar(value="TVA (18%) : 0 F CFA")
+        tk.Label(left, textvariable=self.tva_live_var, font=FONT_NORMAL, bg="white",
+                 fg="#666").grid(row=8, column=0, columnspan=3, sticky="e")
 
-    def enregistrer(self):
+        right = tk.Frame(top, bg="white", padx=20, pady=15,
+                         highlightbackground=COLOR_ACCENT, highlightthickness=2, width=320)
+        right.pack(side="left", fill="y")
+        tk.Label(right, text="Informations Client", font=FONT_SUBTITLE, bg="white",
+                 fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(0, 10))
+        tk.Label(right, text="Nom du client *", bg="white", font=FONT_NORMAL).pack(anchor="w")
+        self.client_nom = tk.StringVar()
+        ttk.Entry(right, textvariable=self.client_nom, width=30).pack(pady=(2, 8))
+        tk.Label(right, text="Téléphone *", bg="white", font=FONT_NORMAL).pack(anchor="w")
+        self.client_tel = tk.StringVar()
+        ttk.Entry(right, textvariable=self.client_tel, width=30).pack(pady=(2, 8))
+        tk.Label(right, text="Quartier / Adresse", bg="white", font=FONT_NORMAL).pack(anchor="w")
+        self.client_adr = tk.StringVar()
+        ttk.Entry(right, textvariable=self.client_adr, width=30).pack(pady=(2, 15))
+        self.tva_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(right, text=f"Appliquer la TVA ({int(TVA_TAUX*100)}%)", variable=self.tva_var,
+                       command=self.actualiser_total, bg="white", font=FONT_BOLD,
+                       fg=COLOR_PRIMARY_DARK, activebackground="white", selectcolor=COLOR_ACCENT,
+                       cursor="hand2").pack(anchor="w", pady=(0, 10))
+        tk.Label(right, text="Le quartier/adresse est facultatif.", bg="white", fg="#777",
+                 font=("Segoe UI", 9, "italic")).pack(anchor="w")
+
+        tk.Label(c, text="Factures de prestations enregistrées aujourd'hui", font=FONT_SUBTITLE,
+                 bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(20, 5))
+        self.fact_tree = ttk.Treeview(c, columns=("numero", "heure", "client", "total"),
+                                      show="headings", height=6)
+        for cc, h in (("numero", "N° Facture"), ("heure", "Heure"), ("client", "Client"), ("total", "Total")):
+            self.fact_tree.heading(cc, text=h)
+            self.fact_tree.column(cc, anchor="center")
+        self.fact_tree.pack(fill="x")
+        self.fact_tree.bind("<Double-1>", self.voir_facture)
+
+        left.grid_columnconfigure(1, weight=1)
+        left.grid_rowconfigure(5, weight=1)
+        self.refresh_factures_jour()
+
+    def calculer_totaux(self):
+        montant_ht = sum(l["montant"] for l in self.panier)
+        montant_tva = montant_ht * TVA_TAUX if self.tva_var.get() else 0
+        return montant_ht, montant_tva, montant_ht + montant_tva
+
+    def actualiser_total(self):
+        ht, tva, total = self.calculer_totaux()
+        self.tva_live_var.set(f"TVA ({int(TVA_TAUX*100)}%) : {tva:,.0f} F CFA".replace(",", " "))
+        self.total_live_var.set(f"TOTAL À PAYER : {total:,.0f} F CFA".replace(",", " "))
+
+    def ajouter_panier(self):
         if is_journee_cloturee():
             messagebox.showerror("Erreur", "La journée est clôturée.")
             return
         libelle = self.libelle_var.get().strip()
         if not libelle:
-            messagebox.showerror("Erreur", "Le libellé du service est obligatoire.")
+            messagebox.showerror("Erreur", "Le libellé est obligatoire.")
             return
         try:
-            montant = float(self.montant_var.get().replace(",", "."))
+            montant = float(self.montant_var.get().replace(" ", "").replace(",", "."))
         except ValueError:
-            messagebox.showerror("Erreur", "Montant invalide.")
+            messagebox.showerror("Erreur", "Le montant doit être numérique.")
             return
         if montant <= 0:
             messagebox.showerror("Erreur", "Le montant doit être positif.")
             return
-
-        conn = get_conn()
-        conn.execute("INSERT INTO prestations (date_jour, date_heure, libelle, montant, utilisateur) VALUES (?,?,?,?,?)",
-                     (today_str(), now_str(), libelle, montant, self.app.session["pseudo"]))
-        conn.commit()
-        conn.close()
-        messagebox.showinfo("Succès", f"Prestation « {libelle} » enregistrée pour {montant:,.0f} F CFA.".replace(",", " "))
+        self.panier.append({"libelle": libelle, "montant": montant})
+        self.panier_tree.insert("", "end", values=(libelle, f"{montant:,.0f}".replace(",", " ")))
         self.libelle_var.set("")
         self.montant_var.set("")
-        self.refresh()
+        self.actualiser_total()
 
-    def refresh(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+    def retirer_ligne(self):
+        sel = self.panier_tree.selection()
+        if not sel:
+            return
+        idx = self.panier_tree.index(sel[0])
+        del self.panier[idx]
+        self.panier_tree.delete(sel[0])
+        self.actualiser_total()
+
+    def enregistrer_facture(self):
+        if not self.panier:
+            messagebox.showerror("Erreur", "Le panier est vide.")
+            return
+        if not self.client_nom.get().strip() or not self.client_tel.get().strip():
+            messagebox.showerror("Erreur", "Veuillez renseigner le nom et le téléphone du client.")
+            return
+        ServiceFacturePreview(self, self.app, self.panier, self.client_nom.get().strip(),
+                              self.client_tel.get().strip(), self.client_adr.get().strip(),
+                              self.tva_var.get())
+
+    def valider_facture(self):
+        self.panier = []
+        for i in self.panier_tree.get_children():
+            self.panier_tree.delete(i)
+        self.client_nom.set("")
+        self.client_tel.set("")
+        self.client_adr.set("")
+        self.tva_var.set(False)
+        self.refresh_factures_jour()
+        self.actualiser_total()
+
+    def refresh_factures_jour(self):
+        for i in self.fact_tree.get_children():
+            self.fact_tree.delete(i)
         conn = get_conn()
-        rows = conn.execute("SELECT * FROM prestations WHERE date_jour=? ORDER BY id DESC", (today_str(),)).fetchall()
+        rows = conn.execute("SELECT * FROM service_factures WHERE date_jour=? ORDER BY id DESC",
+                            (today_str(),)).fetchall()
         conn.close()
-        total = 0
         for r in rows:
             heure = r["date_heure"].split(" ")[1] if " " in r["date_heure"] else r["date_heure"]
-            self.tree.insert("", "end", values=(heure, r["libelle"], f"{r['montant']:.0f}", r["utilisateur"]))
-            total += r["montant"]
-        self.total_lbl.config(text=f"Total du jour : {total:,.0f} F CFA".replace(",", " "))
+            self.fact_tree.insert("", "end", iid=str(r["id"]),
+                                  values=(r["numero"], heure, r["client_nom"], f"{r['total']:.0f}"))
+
+    def voir_facture(self, event=None):
+        sel = self.fact_tree.selection()
+        if not sel:
+            return
+        show_service_facture_detail(self.app, int(sel[0]))
+
+
+class ServiceFacturePreview(tk.Toplevel):
+    def __init__(self, prestation_frame, app, panier, nom, tel, adr, tva_active=False):
+        super().__init__(prestation_frame)
+        self.prestation_frame = prestation_frame
+        self.app = app
+        self.panier = panier
+        self.nom, self.tel, self.adr = nom, tel, adr
+        self.tva_active = tva_active
+        self.title("Enregistrer la facture de prestation")
+        self.geometry("680x720")
+        self.minsize(680, 720)
+        self.configure(bg="white")
+        self.grab_set()
+        self.build()
+
+    def build(self):
+        logo = load_logo(60)
+        if logo:
+            lbl = tk.Label(self, image=logo, bg="white")
+            lbl.image = logo
+            lbl.pack(pady=(12, 0))
+        else:
+            tk.Label(self, text="AMINA FDS", font=("Segoe UI", 18, "bold"),
+                     fg=COLOR_PRIMARY, bg="white").pack(pady=(15, 0))
+        tk.Label(self, text="Facture de prestation de services", font=FONT_NORMAL,
+                 bg="white", fg="#666").pack(pady=(0, 10))
+        info = tk.Frame(self, bg="white")
+        info.pack(fill="x", padx=20)
+        tk.Label(info, text=f"Client : {self.nom}", font=FONT_BOLD, bg="white").pack(anchor="w")
+        tk.Label(info, text=f"Téléphone : {self.tel}", bg="white").pack(anchor="w")
+        if self.adr:
+            tk.Label(info, text=f"Adresse/Quartier : {self.adr}", bg="white").pack(anchor="w")
+        tk.Label(info, text=f"Date : {now_str()}", bg="white").pack(anchor="w", pady=(0, 10))
+
+        tree = ttk.Treeview(self, columns=("libelle", "montant"), show="headings", height=9)
+        tree.heading("libelle", text="Libellé")
+        tree.heading("montant", text="Montant")
+        tree.column("libelle", width=430, anchor="w")
+        tree.column("montant", width=160, anchor="center")
+        tree.pack(fill="both", expand=True, padx=20)
+        montant_ht = 0
+        for l in self.panier:
+            montant_ht += l["montant"]
+            tree.insert("", "end", values=(l["libelle"], f"{l['montant']:,.0f} F CFA".replace(",", " ")))
+        montant_tva = montant_ht * TVA_TAUX if self.tva_active else 0
+        montant_total = montant_ht + montant_tva
+
+        totaux = tk.Frame(self, bg="white")
+        totaux.pack(fill="x", padx=20, pady=(10, 0))
+        def row(label, value, bold=False):
+            fr = tk.Frame(totaux, bg="white")
+            fr.pack(fill="x")
+            font = FONT_BOLD if bold else FONT_NORMAL
+            tk.Label(fr, text=label, font=font, bg="white").pack(side="left")
+            tk.Label(fr, text=f"{value:,.0f} F CFA".replace(",", " "), font=font, bg="white").pack(side="right")
+        row("Sous-total HT :", montant_ht)
+        if self.tva_active:
+            row(f"TVA ({int(TVA_TAUX*100)}%) :", montant_tva)
+        tk.Label(self, text=f"MONTANT TOTAL À PAYER : {montant_total:,.0f} F CFA".replace(",", " "),
+                 font=("Segoe UI", 14, "bold"), bg="white", fg=COLOR_PRIMARY_DARK).pack(pady=(12, 5))
+        tk.Label(self, text=f"Arrêtée à la somme de {montant_en_lettres(montant_total)} francs CFA.",
+                 font=("Segoe UI", 10, "italic"), bg="white", fg="#444", wraplength=620,
+                 justify="center").pack(padx=20, pady=(0, 12))
+        self.montant_ht, self.montant_tva, self.montant_total = montant_ht, montant_tva, montant_total
+        btns = tk.Frame(self, bg="white")
+        btns.pack(pady=8)
+        ttk.Button(btns, text="✏ Modifier", command=self.destroy).pack(side="left", padx=10, ipadx=10)
+        ttk.Button(btns, text="✅ Enregistrer définitivement", style="Primary.TButton",
+                   command=self.enregistrer).pack(side="left", padx=10, ipadx=10)
+
+    def enregistrer(self):
+        if is_journee_cloturee():
+            messagebox.showerror("Erreur", "La journée est clôturée.")
+            self.destroy()
+            return
+        numero = generate_numero_service_facture()
+        conn = get_conn()
+        cur = conn.execute("""INSERT INTO service_factures
+            (numero, date_heure, date_jour, client_nom, client_tel, client_adresse, total,
+             utilisateur, modifiee, tva_active, montant_ht, montant_tva)
+            VALUES (?,?,?,?,?,?,?, ?,0,?,?,?)""",
+            (numero, now_str(), today_str(), self.nom, self.tel, self.adr, self.montant_total,
+             self.app.session["pseudo"], 1 if self.tva_active else 0,
+             self.montant_ht, self.montant_tva))
+        facture_id = cur.lastrowid
+        for l in self.panier:
+            conn.execute("INSERT INTO service_facture_lignes (facture_id, libelle, montant) VALUES (?,?,?)",
+                         (facture_id, l["libelle"], l["montant"]))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Succès", f"Facture {numero} enregistrée avec succès.\n"
+                            f"Montant total : {self.montant_total:,.0f} F CFA".replace(",", " "))
+        self.prestation_frame.valider_facture()
+        self.destroy()
+
+
+def show_service_facture_detail(app, facture_id):
+    conn = get_conn()
+    facture = conn.execute("SELECT * FROM service_factures WHERE id=?", (facture_id,)).fetchone()
+    lignes = conn.execute("SELECT * FROM service_facture_lignes WHERE facture_id=? ORDER BY id", (facture_id,)).fetchall()
+    conn.close()
+    if not facture:
+        return
+    top = tk.Toplevel(app)
+    top.title(f"Facture {facture['numero']}")
+    top.geometry("650x650")
+    top.configure(bg="white")
+    logo = load_logo(60)
+    if logo:
+        lbl = tk.Label(top, image=logo, bg="white")
+        lbl.image = logo
+        lbl.pack(pady=(12, 0))
+    tk.Label(top, text=f"Facture N° {facture['numero']}", font=FONT_SUBTITLE, bg="white",
+             fg=COLOR_PRIMARY_DARK).pack(pady=8)
+    info = tk.Frame(top, bg="white")
+    info.pack(fill="x", padx=20)
+    tk.Label(info, text=f"Client : {facture['client_nom']}", font=FONT_BOLD, bg="white").pack(anchor="w")
+    tk.Label(info, text=f"Téléphone : {facture['client_tel']}", bg="white").pack(anchor="w")
+    if facture["client_adresse"]:
+        tk.Label(info, text=f"Adresse/Quartier : {facture['client_adresse']}", bg="white").pack(anchor="w")
+    tk.Label(info, text=f"Date : {facture['date_heure']}", bg="white").pack(anchor="w", pady=(0, 10))
+    tree = ttk.Treeview(top, columns=("libelle", "montant"), show="headings", height=9)
+    tree.heading("libelle", text="Libellé")
+    tree.heading("montant", text="Montant")
+    tree.column("libelle", width=400, anchor="w")
+    tree.column("montant", width=150, anchor="center")
+    tree.pack(fill="both", expand=True, padx=20)
+    for l in lignes:
+        tree.insert("", "end", values=(l["libelle"], f"{l['montant']:,.0f} F CFA".replace(",", " ")))
+    ht = facture["montant_ht"] or 0
+    tva = facture["montant_tva"] or 0
+    total = facture["total"] or 0
+    totals = tk.Frame(top, bg="white")
+    totals.pack(fill="x", padx=20, pady=10)
+    def row(label, value):
+        fr = tk.Frame(totals, bg="white")
+        fr.pack(fill="x")
+        tk.Label(fr, text=label, bg="white").pack(side="left")
+        tk.Label(fr, text=f"{value:,.0f} F CFA".replace(",", " "), bg="white", font=FONT_BOLD).pack(side="right")
+    row("Sous-total HT :", ht)
+    if facture["tva_active"]:
+        row(f"TVA ({int(TVA_TAUX*100)}%) :", tva)
+    tk.Label(top, text=f"MONTANT TOTAL À PAYER : {total:,.0f} F CFA".replace(",", " "),
+             font=("Segoe UI", 14, "bold"), bg="white", fg=COLOR_PRIMARY_DARK).pack(pady=(5, 4))
+    tk.Label(top, text=f"Arrêtée à la somme de {montant_en_lettres(total)} francs CFA.",
+             font=("Segoe UI", 10, "italic"), bg="white", fg="#444", wraplength=600,
+             justify="center").pack(padx=20, pady=(0, 12))
 
 
 # ------------------------------------------------------------------
