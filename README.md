@@ -1,15 +1,11 @@
 # AMINA FDS — Logiciel de Gestion de Stock
 
+> **Mise à jour v1.3.0** : nouveau fonctionnement des stocks par sacs. Les matières premières sont saisies directement en kilogrammes. Les produits semi-finis et finis sont paramétrés avec le **nombre de sacs**, le **poids d’un sac en Kg** et le **prix de vente par sac**. Le champ de coût unitaire n’est plus demandé. En facturation, la saisie du nombre de sacs calcule automatiquement le poids total en Kg et le montant de la ligne. Les calculs de marge/bénéfice ont été retirés de l’interface directeur et des rapports. La base existante est migrée automatiquement.
+
 > **Mise à jour v1.2.1** : nouveau menu **Prestation de Services** avec établissement de factures multi-lignes pour les prestations d'infographie et autres services, panier, total en temps réel, TVA à 18 %, informations client et montant total en lettres. Les factures de services sont enregistrées séparément et intégrées au chiffre d'affaires.
 
 
-> **Mise à jour v1.1.0** : ajout du prix unitaire de vente pour les produits
-> semi-finis (désormais vendables) ; nouvel onglet **Dépenses** dédié
-> (Secrétaire + Chef) avec date modifiable, libellé et montant ; possibilité
-> pour le Chef de modifier les prix de vente des produits semi-finis/finis
-> depuis Options avancées ; tableau de bord du Chef enrichi avec le chiffre
-> d'affaires, le bénéfice brut et le bénéfice net du jour ; mise en
-> surbrillance (jaune foncé / texte noir) du bouton de menu actif.
+> **Mise à jour v1.1.0** : ajout du prix unitaire de vente pour les produits semi-finis, nouvel onglet **Dépenses**, options avancées et améliorations du tableau de bord.
 >
 > **Mise à jour précédente** : correction de l'erreur `sqlite3.OperationalError:
 > unable to open database file` qui pouvait survenir après installation de
@@ -166,9 +162,9 @@ Au tout premier démarrage, l'application vous guide automatiquement :
    niveau 1** (secrétaire) et un **mot de passe niveau 2** (chef), avec
    confirmation pour chacun.
 3. **Stock initial** : saisissez, dans l'ordre, vos matières premières, vos
-   produits semi-finis, puis vos produits finis déjà en stock (nom, quantité
-   en Kg, coût, et prix de vente pour les produits finis). Vous pouvez en
-   enregistrer autant que nécessaire avant de passer à l'étape suivante.
+   produits semi-finis, puis vos produits finis déjà en stock. Pour les matières
+   premières, indiquez le stock en Kg. Pour les semi-finis et finis, indiquez
+   le nombre de sacs, le poids d'un sac en Kg et le prix de vente par sac.
 4. Cliquez sur **Terminer** → vous arrivez sur l'écran de connexion.
 
 ## 6. Connexion et niveaux d'accès
@@ -185,7 +181,7 @@ Au tout premier démarrage, l'application vous guide automatiquement :
 
 - **Niveau 2 (mot de passe niveau 2)** — *Chef* :
   - Toutes les fonctions du niveau 1
-  - Voit en plus la **valeur monétaire** du stock (prix de vente x quantité)
+  - Voit en plus la **valeur de vente estimée** des stocks semi-finis et finis
   - **Options avancées** :
     - Modifier les mots de passe niveau 1 et niveau 2
     - Modifier une facture déjà enregistrée
@@ -196,16 +192,17 @@ Au tout premier démarrage, l'application vous guide automatiquement :
 ## 7. Fonctionnement des ventes
 
 1. Cliquez sur **Vendre**.
-2. Ajoutez un ou plusieurs produits (semi-finis et/ou finis) au panier.
-3. Renseignez obligatoirement le **nom**, le **téléphone** et **le quartier /
+2. Choisissez un produit semi-fini ou fini et saisissez le **nombre de sacs vendus**. Le logiciel affiche automatiquement le poids total correspondant en Kg et le montant calculé avec le prix par sac.
+3. Ajoutez un ou plusieurs produits au panier.
+4. Renseignez obligatoirement le **nom**, le **téléphone** et **le quartier /
    adresse** du client.
-4. Cliquez sur **Aperçu Facture** : la facture s'affiche en mode prévisualisation
+5. Cliquez sur **Aperçu Facture** : la facture s'affiche en mode prévisualisation
    avec un bouton **Modifier** (pour revenir en arrière) et un bouton
    **Enregistrer définitivement**.
-5. Une fois enregistrée, la facture reçoit un numéro unique, le stock est
+6. Une fois enregistrée, la facture reçoit un numéro unique, le stock est
    automatiquement décrémenté, et elle apparaît dans la liste des factures
    du jour (double-cliquez dessus pour en voir le détail).
-6. Seul le **niveau 2 (chef)** peut modifier une facture déjà enregistrée
+7. Seul le **niveau 2 (chef)** peut modifier une facture déjà enregistrée
    (menu Options avancées → Modifier une facture).
 
 ## 8. Prestation de services
@@ -277,4 +274,16 @@ copie de sauvegarde régulièrement (clé USB, cloud, etc.).
 - Ajout du **transport à la charge du client**, facultatif, intégré au total et conservé sur la facture.
 - Montant total écrit en toutes lettres sur l'aperçu et sur les factures enregistrées.
 - Migration automatique de la base SQLite existante : les anciennes factures conservent un transport à 0 F CFA.
-- Version installateur : **1.2.1**.
+- Version installateur : **1.3.0**.
+
+
+## Mise à jour 1.3.0 — Gestion par sacs
+
+- Matières premières : saisie du stock en Kg uniquement.
+- Produits semi-finis et finis : nombre de sacs, poids par sac, prix de vente par sac.
+- Suppression des champs de coût unitaire dans les écrans de saisie.
+- Facturation : saisie du nombre de sacs, calcul automatique des Kg et du montant.
+- Stock décrémenté en Kg lors de la vente.
+- Factures et modifications de factures affichent sacs, Kg et prix par sac.
+- Suppression des calculs de marge/bénéfice de l’interface directeur et des rapports.
+- Migration automatique des bases créées avec les versions précédentes.

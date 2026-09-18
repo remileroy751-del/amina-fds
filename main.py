@@ -24,7 +24,7 @@ except ImportError:
 # CONFIGURATION GENERALE
 # ------------------------------------------------------------------
 APP_TITLE = "AMINA FDS - Gestion de Stock"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -195,7 +195,9 @@ def init_db():
         configured INTEGER DEFAULT 0
     )""")
     for table in TYPES_PRODUITS.values():
-        extra = ", prix_vente REAL DEFAULT 0" if table in ("produits_finis", "produits_semi_finis") else ""
+        # Le champ historique « cout » est conservé uniquement pour assurer la
+        # compatibilité avec les anciennes bases. Il n'est plus saisi ni utilisé.
+        extra = ", prix_vente REAL DEFAULT 0, poids_sac REAL DEFAULT 0" if table in ("produits_finis", "produits_semi_finis") else ""
         c.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nom TEXT UNIQUE NOT NULL,
@@ -203,12 +205,12 @@ def init_db():
             cout REAL DEFAULT 0
             {extra}
         )""")
-        # Migration douce : ajoute la colonne prix_vente si la table existait déjà
-        # sans cette colonne (bases de données créées avant cette mise à jour).
         if table in ("produits_finis", "produits_semi_finis"):
             existing_prod_cols = [r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
             if "prix_vente" not in existing_prod_cols:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN prix_vente REAL DEFAULT 0")
+            if "poids_sac" not in existing_prod_cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN poids_sac REAL DEFAULT 0")
     c.execute("""CREATE TABLE IF NOT EXISTS stock_journal (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date_heure TEXT,
@@ -278,10 +280,17 @@ def init_db():
         type_produit TEXT,
         produit_nom TEXT,
         quantite REAL,
+        nombre_sacs REAL DEFAULT 0,
+        poids_sac REAL DEFAULT 0,
         prix_unitaire REAL,
         sous_total REAL,
         FOREIGN KEY (facture_id) REFERENCES factures(id)
     )""")
+    existing_ligne_cols = [r["name"] for r in c.execute("PRAGMA table_info(facture_lignes)").fetchall()]
+    if "nombre_sacs" not in existing_ligne_cols:
+        c.execute("ALTER TABLE facture_lignes ADD COLUMN nombre_sacs REAL DEFAULT 0")
+    if "poids_sac" not in existing_ligne_cols:
+        c.execute("ALTER TABLE facture_lignes ADD COLUMN poids_sac REAL DEFAULT 0")
     c.execute("""CREATE TABLE IF NOT EXISTS depenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date_jour TEXT,
@@ -370,44 +379,6 @@ def get_prestations_total(date_debut, date_fin):
                             (date_debut, date_fin)).fetchone()
     conn.close()
     return (legacy["t"] + services["t"], legacy["n"] + services["n"])
-
-
-def compute_journee_finances(date_jour):
-    """Calcule, pour une date donnée : le chiffre d'affaires, le bénéfice
-    brut (CA - coût de revient des produits vendus, semi-finis + finis,
-    au coût actuellement enregistré en stock) et le bénéfice net (bénéfice
-    brut - dépenses de la journée)."""
-    conn = get_conn()
-    total_ventes = conn.execute(
-        "SELECT COALESCE(SUM(total),0) as t FROM factures WHERE date_jour=?", (date_jour,)).fetchone()["t"]
-    total_prestations, _ = get_prestations_total(date_jour, date_jour)
-    chiffre_affaires = total_ventes + total_prestations
-
-    lignes = conn.execute("""SELECT fl.type_produit, fl.produit_nom, fl.quantite
-                              FROM facture_lignes fl
-                              JOIN factures f ON f.id = fl.facture_id
-                              WHERE f.date_jour=?""", (date_jour,)).fetchall()
-    cout_revient = 0.0
-    for l in lignes:
-        tc = next((k for k, v in TYPE_LABELS.items() if v == l["type_produit"]), None)
-        if tc in ("PSF", "PF"):
-            table = TYPES_PRODUITS[tc]
-            row = conn.execute(f"SELECT cout FROM {table} WHERE nom=?", (l["produit_nom"],)).fetchone()
-            cout_revient += (row["cout"] if row else 0) * l["quantite"]
-
-    depenses_jour = conn.execute(
-        "SELECT COALESCE(SUM(montant),0) as t FROM depenses WHERE date_jour=?", (date_jour,)).fetchone()["t"]
-    conn.close()
-
-    benefice_brut = chiffre_affaires - cout_revient
-    benefice_net = benefice_brut - depenses_jour
-    return {
-        "chiffre_affaires": chiffre_affaires,
-        "cout_revient": cout_revient,
-        "benefice_brut": benefice_brut,
-        "depenses": depenses_jour,
-        "benefice_net": benefice_net,
-    }
 
 
 def generate_numero_service_facture():
@@ -669,8 +640,7 @@ class StockInitFrame(tk.Frame):
         self.type_code = type_code
 
         wrap = tk.Frame(self, bg=COLOR_BG)
-        wrap.place(relx=0.5, rely=0.5, anchor="center", width=650)
-
+        wrap.place(relx=0.5, rely=0.5, anchor="center", width=760)
         header = tk.Frame(wrap, bg=COLOR_BG)
         header.pack(pady=(0, 15))
         logo = load_logo(50)
@@ -684,107 +654,96 @@ class StockInitFrame(tk.Frame):
 
         form = tk.Frame(wrap, bg="white", padx=25, pady=20, highlightbackground=COLOR_ACCENT, highlightthickness=2)
         form.pack(fill="x")
-
-        tk.Label(form, text="Nom du produit", font=FONT_NORMAL, bg="white").grid(row=0, column=0, sticky="w", pady=6)
+        tk.Label(form, text="Nom du produit", bg="white").grid(row=0, column=0, sticky="w", pady=6)
         self.nom_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.nom_var, width=25).grid(row=0, column=1, padx=10)
+        ttk.Entry(form, textvariable=self.nom_var, width=28).grid(row=0, column=1, padx=10)
 
-        tk.Label(form, text="Quantité (Kg)", font=FONT_NORMAL, bg="white").grid(row=1, column=0, sticky="w", pady=6)
-        self.qte_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.qte_var, width=25).grid(row=1, column=1, padx=10)
-
-        tk.Label(form, text="Coût (unité/Kg)", font=FONT_NORMAL, bg="white").grid(row=2, column=0, sticky="w", pady=6)
-        self.cout_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.cout_var, width=25).grid(row=2, column=1, padx=10)
-
-        next_row = 3
-        self.prix_var = None
-        if type_code in ("PSF", "PF"):
-            tk.Label(form, text="Prix unitaire de vente (unité/Kg)", font=FONT_NORMAL, bg="white").grid(row=3, column=0, sticky="w", pady=6)
+        if type_code == "MP":
+            tk.Label(form, text="Stock initial (Kg)", bg="white").grid(row=1, column=0, sticky="w", pady=6)
+            self.qte_var = tk.StringVar(value="0")
+            ttk.Entry(form, textvariable=self.qte_var, width=28).grid(row=1, column=1, padx=10)
+            self.sacs_var = self.poids_sac_var = self.prix_var = None
+            next_row = 2
+        else:
+            tk.Label(form, text="Nombre de sacs", bg="white").grid(row=1, column=0, sticky="w", pady=6)
+            self.sacs_var = tk.StringVar(value="0")
+            ttk.Entry(form, textvariable=self.sacs_var, width=28).grid(row=1, column=1, padx=10)
+            tk.Label(form, text="Poids d'un sac (Kg)", bg="white").grid(row=2, column=0, sticky="w", pady=6)
+            self.poids_sac_var = tk.StringVar(value="0")
+            ttk.Entry(form, textvariable=self.poids_sac_var, width=28).grid(row=2, column=1, padx=10)
+            tk.Label(form, text="Prix unitaire de vente par sac", bg="white").grid(row=3, column=0, sticky="w", pady=6)
             self.prix_var = tk.StringVar(value="0")
-            ttk.Entry(form, textvariable=self.prix_var, width=25).grid(row=3, column=1, padx=10)
+            ttk.Entry(form, textvariable=self.prix_var, width=28).grid(row=3, column=1, padx=10)
+            self.qte_var = None
             next_row = 4
 
-        ttk.Button(form, text="Enregistrer", command=self.enregistrer).grid(row=next_row, column=0, columnspan=2, pady=(15, 0), ipadx=10)
-
-        # Liste des éléments déjà enregistrés
-        tk.Label(wrap, text="Éléments enregistrés :", font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", pady=(15, 5))
-        cols = ("nom", "qte", "cout") if type_code == "MP" else ("nom", "qte", "cout", "prix")
+        ttk.Button(form, text="Enregistrer", command=self.enregistrer).grid(row=next_row, column=0, columnspan=2, pady=(15,0), ipadx=10)
+        tk.Label(wrap, text="Éléments enregistrés :", font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", pady=(15,5))
+        cols = ("nom","kg") if type_code == "MP" else ("nom","sacs","poids","kg","prix")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=6)
-        headers = {"nom": "Nom", "qte": "Quantité (Kg)", "cout": "Coût", "prix": "Prix unitaire de vente"}
+        heads={"nom":"Nom","kg":"Stock total (Kg)","sacs":"Nombre de sacs","poids":"Poids/sac (Kg)","prix":"Prix/sac"}
         for c in cols:
-            self.tree.heading(c, text=headers[c])
-            self.tree.column(c, width=140, anchor="center")
+            self.tree.heading(c,text=heads[c]); self.tree.column(c,width=135,anchor="center")
         self.tree.pack(fill="x")
-
-        btn_frame = tk.Frame(wrap, bg=COLOR_BG)
-        btn_frame.pack(pady=20)
-        label_next = "Terminer ✔" if type_code == "PF" else "Suivant ➜"
-        ttk.Button(btn_frame, text=label_next, style="Primary.TButton", command=self.next_step).pack(ipadx=15, ipady=4)
-
+        btn_frame=tk.Frame(wrap,bg=COLOR_BG); btn_frame.pack(pady=20)
+        ttk.Button(btn_frame, text="Terminer ✔" if type_code=="PF" else "Suivant ➜",
+                   style="Primary.TButton", command=self.next_step).pack(ipadx=15,ipady=4)
         self.refresh_list()
 
     def enregistrer(self):
-        nom = capitaliser_nom(self.nom_var.get())
+        nom=capitaliser_nom(self.nom_var.get())
         if not nom:
-            messagebox.showerror("Erreur", "Le nom du produit est obligatoire.")
-            return
+            messagebox.showerror("Erreur","Le nom du produit est obligatoire."); return
         try:
-            qte = float(self.qte_var.get().replace(",", ".")) if self.qte_var.get() else 0.0
-            cout = float(self.cout_var.get().replace(",", ".")) if self.cout_var.get() else 0.0
-            prix = float(self.prix_var.get().replace(",", ".")) if self.prix_var else 0.0
-        except ValueError:
-            messagebox.showerror("Erreur", "Quantité / Coût / Prix doivent être numériques.")
-            return
-
-        table = TYPES_PRODUITS[self.type_code]
-        conn = get_conn()
-        try:
-            if self.type_code in ("PSF", "PF"):
-                conn.execute(f"INSERT INTO {table} (nom, quantite, cout, prix_vente) VALUES (?,?,?,?)",
-                             (nom, qte, cout, prix))
+            if self.type_code == "MP":
+                qte=float(self.qte_var.get().replace(",","."))
+                if qte < 0: raise ValueError
+                poids_sac=prix=sacs=0.0
             else:
-                conn.execute(f"INSERT INTO {table} (nom, quantite, cout) VALUES (?,?,?)", (nom, qte, cout))
+                sacs=float(self.sacs_var.get().replace(",","."))
+                poids_sac=float(self.poids_sac_var.get().replace(",","."))
+                prix=float(self.prix_var.get().replace(",","."))
+                if sacs < 0 or poids_sac <= 0 or prix < 0: raise ValueError
+                qte=sacs*poids_sac
+        except ValueError:
+            messagebox.showerror("Erreur","Veuillez saisir des valeurs numériques valides."); return
+        table=TYPES_PRODUITS[self.type_code]
+        conn=get_conn()
+        try:
+            if self.type_code == "MP":
+                conn.execute(f"INSERT INTO {table} (nom, quantite, cout) VALUES (?,?,0)",(nom,qte))
+            else:
+                conn.execute(f"INSERT INTO {table} (nom, quantite, cout, prix_vente, poids_sac) VALUES (?,?,0,?,?)",
+                             (nom,qte,prix,poids_sac))
             conn.commit()
         except sqlite3.IntegrityError:
-            messagebox.showerror("Erreur", f"« {nom} » existe déjà.")
-            conn.close()
-            return
+            messagebox.showerror("Erreur",f"« {nom} » existe déjà."); conn.close(); return
         conn.close()
-
         self.nom_var.set("")
-        self.qte_var.set("0")
-        self.cout_var.set("0")
-        if self.prix_var:
-            self.prix_var.set("0")
+        if self.qte_var: self.qte_var.set("0")
+        if self.sacs_var: self.sacs_var.set("0"); self.poids_sac_var.set("0"); self.prix_var.set("0")
         self.refresh_list()
 
     def refresh_list(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        for row in get_stock(self.type_code):
-            if self.type_code in ("PSF", "PF"):
-                self.tree.insert("", "end", values=(row["nom"], row["quantite"], row["cout"], row["prix_vente"]))
+        for i in self.tree.get_children(): self.tree.delete(i)
+        for r in get_stock(self.type_code):
+            if self.type_code == "MP":
+                self.tree.insert("","end",values=(r["nom"],f"{r['quantite']:.2f}"))
             else:
-                self.tree.insert("", "end", values=(row["nom"], row["quantite"], row["cout"]))
+                poids=r["poids_sac"] or 0
+                sacs=(r["quantite"]/poids) if poids else 0
+                self.tree.insert("","end",values=(r["nom"],f"{sacs:.2f}",f"{poids:.2f}",f"{r['quantite']:.2f}",f"{r['prix_vente']:.0f}"))
 
     def next_step(self):
-        idx = self.STEP_ORDER.index(self.type_code)
-        if idx + 1 < len(self.STEP_ORDER):
-            self.app.show_frame(StockInitFrame, type_code=self.STEP_ORDER[idx + 1])
+        idx=self.STEP_ORDER.index(self.type_code)
+        if idx+1<len(self.STEP_ORDER):
+            self.app.show_frame(StockInitFrame,type_code=self.STEP_ORDER[idx+1])
         else:
-            conn = get_conn()
-            conn.execute("UPDATE config SET configured=1 WHERE id=1")
-            conn.commit()
-            conn.close()
-            messagebox.showinfo("Configuration terminée",
-                                 "La configuration initiale est terminée. Vous pouvez maintenant vous connecter.")
+            conn=get_conn(); conn.execute("UPDATE config SET configured=1 WHERE id=1"); conn.commit(); conn.close()
+            messagebox.showinfo("Configuration terminée","La configuration initiale est terminée. Vous pouvez maintenant vous connecter.")
             self.app.show_frame(LoginFrame)
 
 
-# ------------------------------------------------------------------
-# ECRAN DE CONNEXION
-# ------------------------------------------------------------------
 class LoginFrame(tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=COLOR_BG)
@@ -917,31 +876,23 @@ class DashboardFrame(tk.Frame):
             cards_frame.grid_columnconfigure(i, weight=1)
             tk.Label(card, text=TYPE_LABELS[tc], font=FONT_BOLD, bg="white", fg=COLOR_PRIMARY_DARK).pack(anchor="w")
             tk.Label(card, text=f"{total_qte:.2f} Kg", font=("Segoe UI", 20, "bold"), bg="white", fg=COLOR_PRIMARY).pack(anchor="w", pady=(5, 0))
-            if level == 2:
-                if tc in ("PSF", "PF"):
-                    valeur = sum(r["quantite"] * r["prix_vente"] for r in rows)
-                else:
-                    valeur = sum(r["quantite"] * r["cout"] for r in rows)
-                tk.Label(card, text=f"Valeur : {valeur:,.0f} F CFA".replace(",", " "), font=FONT_NORMAL, bg="white", fg="#666").pack(anchor="w")
+            if level == 2 and tc in ("PSF", "PF"):
+                valeur = sum(((r["quantite"] / r["poids_sac"]) if r["poids_sac"] else 0) * r["prix_vente"] for r in rows)
+                tk.Label(card, text=f"Valeur de vente estimée : {valeur:,.0f} F CFA".replace(",", " "), font=FONT_NORMAL, bg="white", fg="#666").pack(anchor="w")
 
-        # --- Bloc finances du jour (visible uniquement par le Chef / Directeur) ---
+        # Finances du jour : aucun calcul de marge/bénéfice n'est affiché.
         if level == 2:
-            fin = compute_journee_finances(today_str())
-            fin_frame = tk.Frame(content, bg=COLOR_BG)
-            fin_frame.pack(fill="x", pady=(0, 10))
-            fin_cards = [
-                ("Chiffre d'affaires du jour", fin["chiffre_affaires"], COLOR_PRIMARY_DARK),
-                ("Bénéfice brut du jour", fin["benefice_brut"], COLOR_PRIMARY),
-                ("Bénéfice net du jour (après dépenses)", fin["benefice_net"], COLOR_SUCCESS if fin["benefice_net"] >= 0 else COLOR_DANGER),
-            ]
-            for i, (label, val, color) in enumerate(fin_cards):
+            conn = get_conn()
+            ventes = conn.execute("SELECT COALESCE(SUM(total),0) t FROM factures WHERE date_jour=?", (today_str(),)).fetchone()["t"]
+            depenses = conn.execute("SELECT COALESCE(SUM(montant),0) t FROM depenses WHERE date_jour=?", (today_str(),)).fetchone()["t"]
+            conn.close()
+            prestations, _ = get_prestations_total(today_str(), today_str())
+            fin_frame = tk.Frame(content, bg=COLOR_BG); fin_frame.pack(fill="x", pady=(0, 10))
+            for i, (label, val) in enumerate([("Chiffre d'affaires du jour", ventes + prestations), ("Dépenses du jour", depenses)]):
                 card = tk.Frame(fin_frame, bg="white", highlightbackground=COLOR_ACCENT, highlightthickness=1, padx=20, pady=15)
-                card.grid(row=0, column=i, padx=10, sticky="nsew")
-                fin_frame.grid_columnconfigure(i, weight=1)
+                card.grid(row=0, column=i, padx=10, sticky="nsew"); fin_frame.grid_columnconfigure(i, weight=1)
                 tk.Label(card, text=label, font=FONT_BOLD, bg="white", fg=COLOR_PRIMARY_DARK).pack(anchor="w")
-                tk.Label(card, text=f"{val:,.0f} F CFA".replace(",", " "), font=("Segoe UI", 18, "bold"), bg="white", fg=color).pack(anchor="w", pady=(5, 0))
-            tk.Label(content, text="Dépenses du jour : " + f"{fin['depenses']:,.0f} F CFA".replace(",", " "),
-                     font=FONT_NORMAL, bg=COLOR_BG, fg="#666").pack(anchor="w", pady=(0, 10))
+                tk.Label(card, text=f"{val:,.0f} F CFA".replace(",", " "), font=("Segoe UI", 18, "bold"), bg="white", fg=COLOR_PRIMARY).pack(anchor="w", pady=(5, 0))
 
         # détail par produit
         tk.Label(content, text="Détail du stock en temps réel", font=FONT_SUBTITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(10, 5))
@@ -950,25 +901,17 @@ class DashboardFrame(tk.Frame):
         for tc in ["MP", "PSF", "PF"]:
             tab = tk.Frame(nb, bg="white")
             nb.add(tab, text=TYPE_LABELS[tc])
-            cols = ("nom", "qte", "prix") if (tc in ("PSF", "PF") and level != 2) else \
-                   ("nom", "qte", "cout", "prix") if tc in ("PSF", "PF") else ("nom", "qte", "cout")
+            cols = ("nom", "kg") if tc == "MP" else ("nom", "sacs", "poids", "kg", "prix")
             tree = ttk.Treeview(tab, columns=cols, show="headings", height=8)
-            headers = {"nom": "Nom", "qte": "Quantité (Kg)", "cout": "Coût", "prix": "Prix unitaire de vente"}
-            for c in cols:
-                tree.heading(c, text=headers[c])
-                tree.column(c, anchor="center")
+            headers = {"nom":"Nom", "kg":"Stock (Kg)", "sacs":"Sacs disponibles", "poids":"Poids/sac (Kg)", "prix":"Prix/sac"}
+            for col in cols:
+                tree.heading(col, text=headers[col]); tree.column(col, anchor="center")
             tree.pack(fill="both", expand=True, padx=10, pady=10)
             for r in get_stock(tc):
-                vals = []
-                for c in cols:
-                    if c == "nom":
-                        vals.append(r["nom"])
-                    elif c == "qte":
-                        vals.append(f"{r['quantite']:.2f}")
-                    elif c == "cout":
-                        vals.append(f"{r['cout']:.0f}")
-                    elif c == "prix":
-                        vals.append(f"{r['prix_vente']:.0f}")
+                if tc == "MP": vals=(r["nom"], f"{r['quantite']:.2f}")
+                else:
+                    poids=r["poids_sac"] or 0; sacs=(r["quantite"]/poids) if poids else 0
+                    vals=(r["nom"], f"{sacs:.2f}", f"{poids:.2f}", f"{r['quantite']:.2f}", f"{r['prix_vente']:.0f}")
                 tree.insert("", "end", values=vals)
 
     def cloturer_journee(self):
@@ -1043,138 +986,84 @@ class BaseSidebarFrame(tk.Frame):
 class StockFrame(BaseSidebarFrame):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Stock")
-        c = self.content
-
-        tk.Label(c, text="Gestion du Stock — Entrée", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w")
-
+        c=self.content
+        tk.Label(c,text="Gestion du Stock — Entrée",font=FONT_TITLE,bg=COLOR_BG,fg=COLOR_PRIMARY_DARK).pack(anchor="w")
         if is_journee_cloturee():
-            tk.Label(c, text="⚠ La journée est clôturée : aucune saisie n'est possible.", font=FONT_BOLD,
-                     bg=COLOR_BG, fg=COLOR_DANGER).pack(anchor="w", pady=10)
+            tk.Label(c,text="⚠ La journée est clôturée : aucune saisie n'est possible.",font=FONT_BOLD,bg=COLOR_BG,fg=COLOR_DANGER).pack(anchor="w",pady=10)
+        form=tk.Frame(c,bg="white",padx=25,pady=20,highlightbackground=COLOR_ACCENT,highlightthickness=2); form.pack(fill="x",pady=15)
+        tk.Label(form,text="Type de produit",bg="white").grid(row=0,column=0,sticky="w",pady=6)
+        self.type_var=tk.StringVar(value=TYPE_LABELS["MP"])
+        cb=ttk.Combobox(form,textvariable=self.type_var,state="readonly",width=27,values=[TYPE_LABELS[t] for t in TYPES_PRODUITS]); cb.grid(row=0,column=1,padx=10); cb.bind("<<ComboboxSelected>>",lambda e:self.refresh_produits())
+        tk.Label(form,text="Produit existant",bg="white").grid(row=1,column=0,sticky="w",pady=6)
+        self.produit_var=tk.StringVar(); self.produit_combo=ttk.Combobox(form,textvariable=self.produit_var,state="readonly",width=27); self.produit_combo.grid(row=1,column=1,padx=10)
+        tk.Label(form,text="Nouveau produit ? (optionnel)",bg="white").grid(row=2,column=0,sticky="w",pady=6)
+        self.nouveau_var=tk.StringVar(); ttk.Entry(form,textvariable=self.nouveau_var,width=29).grid(row=2,column=1,padx=10)
 
-        form = tk.Frame(c, bg="white", padx=25, pady=20, highlightbackground=COLOR_ACCENT, highlightthickness=2)
-        form.pack(fill="x", pady=15)
+        self.qte_label=tk.Label(form,text="Quantité à ajouter (Kg)",bg="white"); self.qte_var=tk.StringVar(); self.qte_entry=ttk.Entry(form,textvariable=self.qte_var,width=29)
+        self.sacs_label=tk.Label(form,text="Nombre de sacs à entrer",bg="white"); self.sacs_var=tk.StringVar(); self.sacs_entry=ttk.Entry(form,textvariable=self.sacs_var,width=29)
+        self.poids_label=tk.Label(form,text="Poids d'un sac (Kg)",bg="white"); self.poids_var=tk.StringVar(); self.poids_entry=ttk.Entry(form,textvariable=self.poids_var,width=29)
+        self.prix_label=tk.Label(form,text="Prix unitaire de vente par sac",bg="white"); self.prix_var=tk.StringVar(); self.prix_entry=ttk.Entry(form,textvariable=self.prix_var,width=29)
+        state="disabled" if is_journee_cloturee() else "normal"
+        ttk.Button(form,text="Enregistrer l'entrée",command=self.enregistrer,state=state).grid(row=7,column=0,columnspan=2,pady=(15,0),ipadx=10)
 
-        tk.Label(form, text="Type de produit", font=FONT_NORMAL, bg="white").grid(row=0, column=0, sticky="w", pady=6)
-        self.type_var = tk.StringVar(value="MP")
-        type_combo = ttk.Combobox(form, textvariable=self.type_var, state="readonly", width=25,
-                                   values=[TYPE_LABELS[t] for t in TYPES_PRODUITS])
-        type_combo.current(0)
-        type_combo.grid(row=0, column=1, padx=10)
-        type_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_produits())
-
-        tk.Label(form, text="Produit", font=FONT_NORMAL, bg="white").grid(row=1, column=0, sticky="w", pady=6)
-        self.produit_var = tk.StringVar()
-        self.produit_combo = ttk.Combobox(form, textvariable=self.produit_var, state="readonly", width=25)
-        self.produit_combo.grid(row=1, column=1, padx=10)
-
-        tk.Label(form, text="Quantité à ajouter (Kg)", font=FONT_NORMAL, bg="white").grid(row=2, column=0, sticky="w", pady=6)
-        self.qte_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.qte_var, width=25).grid(row=2, column=1, padx=10)
-
-        tk.Label(form, text="Nouveau produit ? (optionnel)", font=FONT_NORMAL, bg="white").grid(row=3, column=0, sticky="w", pady=6)
-        self.nouveau_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.nouveau_var, width=25).grid(row=3, column=1, padx=10)
-
-        tk.Label(form, text="Coût (unité/Kg)", font=FONT_NORMAL, bg="white").grid(row=4, column=0, sticky="w", pady=6)
-        self.cout_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.cout_var, width=25).grid(row=4, column=1, padx=10)
-
-        self.prix_label = tk.Label(form, text="Prix unitaire de vente (unité/Kg)", font=FONT_NORMAL, bg="white")
-        self.prix_var = tk.StringVar(value="0")
-        self.prix_entry = ttk.Entry(form, textvariable=self.prix_var, width=25)
-
-        state = "disabled" if is_journee_cloturee() else "normal"
-        ttk.Button(form, text="Enregistrer l'entrée", command=self.enregistrer, state=state).grid(
-            row=6, column=0, columnspan=2, pady=(15, 0), ipadx=10)
-
-        tk.Label(c, text="Journal des entrées récentes", font=FONT_SUBTITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(15, 5))
-        cols = ("date", "type", "produit", "qte", "action", "user")
-        self.tree = ttk.Treeview(c, columns=cols, show="headings", height=10)
-        headers = {"date": "Date/Heure", "type": "Type", "produit": "Produit", "qte": "Quantité (Kg)", "action": "Action", "user": "Saisi par"}
-        for cc in cols:
-            self.tree.heading(cc, text=headers[cc])
-            self.tree.column(cc, anchor="center")
-        self.tree.pack(fill="both", expand=True)
-
-        self.refresh_produits()
-        self.refresh_journal()
+        tk.Label(c,text="Journal des entrées récentes",font=FONT_SUBTITLE,bg=COLOR_BG,fg=COLOR_PRIMARY_DARK).pack(anchor="w",pady=(15,5))
+        cols=("date","type","produit","qte","action","user"); self.tree=ttk.Treeview(c,columns=cols,show="headings",height=10)
+        heads={"date":"Date/Heure","type":"Type","produit":"Produit","qte":"Quantité (Kg)","action":"Action","user":"Saisi par"}
+        for cc in cols: self.tree.heading(cc,text=heads[cc]); self.tree.column(cc,anchor="center")
+        self.tree.pack(fill="both",expand=True)
+        self.refresh_produits(); self.refresh_journal()
 
     def type_code(self):
-        label = self.type_var.get()
-        for k, v in TYPE_LABELS.items():
-            if v == label:
-                return k
-        return "MP"
+        return next((k for k,v in TYPE_LABELS.items() if v==self.type_var.get()),"MP")
 
     def refresh_produits(self):
-        tc = self.type_code()
-        rows = get_stock(tc)
-        self.produit_combo["values"] = [r["nom"] for r in rows]
-        if tc in ("PSF", "PF"):
-            self.prix_label.grid(row=5, column=0, sticky="w", pady=6)
-            self.prix_entry.grid(row=5, column=1, padx=10)
+        tc=self.type_code(); rows=get_stock(tc); self.produit_combo["values"]=[r["nom"] for r in rows]; self.produit_var.set("")
+        for w in (self.qte_label,self.qte_entry,self.sacs_label,self.sacs_entry,self.poids_label,self.poids_entry,self.prix_label,self.prix_entry): w.grid_forget()
+        if tc=="MP":
+            self.qte_label.grid(row=3,column=0,sticky="w",pady=6); self.qte_entry.grid(row=3,column=1,padx=10)
         else:
-            self.prix_label.grid_forget()
-            self.prix_entry.grid_forget()
+            self.sacs_label.grid(row=3,column=0,sticky="w",pady=6); self.sacs_entry.grid(row=3,column=1,padx=10)
+            self.poids_label.grid(row=4,column=0,sticky="w",pady=6); self.poids_entry.grid(row=4,column=1,padx=10)
+            self.prix_label.grid(row=5,column=0,sticky="w",pady=6); self.prix_entry.grid(row=5,column=1,padx=10)
 
     def enregistrer(self):
-        if is_journee_cloturee():
-            messagebox.showerror("Erreur", "La journée est clôturée.")
-            return
-        tc = self.type_code()
-        nouveau_nom = capitaliser_nom(self.nouveau_var.get())
-        table = TYPES_PRODUITS[tc]
+        if is_journee_cloturee(): messagebox.showerror("Erreur","La journée est clôturée."); return
+        tc=self.type_code(); table=TYPES_PRODUITS[tc]; nouveau=capitaliser_nom(self.nouveau_var.get()); nom=nouveau or self.produit_var.get()
+        if not nom: messagebox.showerror("Erreur","Sélectionnez un produit ou saisissez-en un nouveau."); return
         try:
-            qte = float(self.qte_var.get().replace(",", "."))
+            if tc=="MP":
+                qte=float(self.qte_var.get().replace(",",".")); poids=prix=sacs=0
+                if qte<=0: raise ValueError
+            else:
+                sacs=float(self.sacs_var.get().replace(",",".")); poids=float(self.poids_var.get().replace(",",".")); prix=float(self.prix_var.get().replace(",",".") or 0)
+                if sacs<=0 or poids<=0 or prix<0: raise ValueError
+                qte=sacs*poids
         except ValueError:
-            messagebox.showerror("Erreur", "Quantité invalide.")
-            return
-
-        conn = get_conn()
-        if nouveau_nom:
-            nom = nouveau_nom
+            messagebox.showerror("Erreur","Veuillez saisir des valeurs numériques valides et positives."); return
+        conn=get_conn()
+        if nouveau:
             try:
-                cout = float(self.cout_var.get().replace(",", ".") or 0)
-                prix = float(self.prix_var.get().replace(",", ".") or 0)
-            except ValueError:
-                cout, prix = 0, 0
-            try:
-                if tc in ("PSF", "PF"):
-                    conn.execute(f"INSERT INTO {table} (nom, quantite, cout, prix_vente) VALUES (?,?,?,?)", (nom, qte, cout, prix))
-                else:
-                    conn.execute(f"INSERT INTO {table} (nom, quantite, cout) VALUES (?,?,?)", (nom, qte, cout))
+                if tc=="MP": conn.execute(f"INSERT INTO {table} (nom,quantite,cout) VALUES (?,?,0)",(nom,qte))
+                else: conn.execute(f"INSERT INTO {table} (nom,quantite,cout,prix_vente,poids_sac) VALUES (?,?,0,?,?)",(nom,qte,prix,poids))
             except sqlite3.IntegrityError:
-                conn.execute(f"UPDATE {table} SET quantite = quantite + ? WHERE nom=?", (qte, nom))
+                if tc=="MP": conn.execute(f"UPDATE {table} SET quantite=quantite+? WHERE nom=?",(qte,nom))
+                else: conn.execute(f"UPDATE {table} SET quantite=quantite+?, poids_sac=?, prix_vente=? WHERE nom=?",(qte,poids,prix,nom))
         else:
-            nom = self.produit_var.get()
-            if not nom:
-                messagebox.showerror("Erreur", "Sélectionnez un produit ou saisissez-en un nouveau.")
-                conn.close()
-                return
-            conn.execute(f"UPDATE {table} SET quantite = quantite + ? WHERE nom=?", (qte, nom))
-        conn.commit()
-        conn.close()
-
-        log_mouvement(TYPE_LABELS[tc], nom, qte, "Entrée en stock", self.app.session["pseudo"])
-        messagebox.showinfo("Succès", f"Entrée de {qte} Kg enregistrée pour « {nom} ».")
-        self.qte_var.set("")
-        self.nouveau_var.set("")
-        self.refresh_produits()
-        self.refresh_journal()
+            if tc=="MP": conn.execute(f"UPDATE {table} SET quantite=quantite+? WHERE nom=?",(qte,nom))
+            else: conn.execute(f"UPDATE {table} SET quantite=quantite+?, poids_sac=?, prix_vente=? WHERE nom=?",(qte,poids,prix,nom))
+        conn.commit(); conn.close()
+        action="Entrée en stock" if tc=="MP" else f"Entrée en stock ({sacs:g} sacs × {poids:g} Kg)"
+        log_mouvement(TYPE_LABELS[tc],nom,qte,action,self.app.session["pseudo"])
+        messagebox.showinfo("Succès",f"Entrée de {qte:g} Kg enregistrée pour « {nom} ».")
+        self.qte_var.set(""); self.sacs_var.set(""); self.poids_var.set(""); self.prix_var.set(""); self.nouveau_var.set("")
+        self.refresh_produits(); self.refresh_journal()
 
     def refresh_journal(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        conn = get_conn()
-        rows = conn.execute("SELECT * FROM stock_journal ORDER BY id DESC LIMIT 50").fetchall()
-        conn.close()
-        for r in rows:
-            self.tree.insert("", "end", values=(r["date_heure"], r["type_produit"], r["produit_nom"], r["quantite"], r["action"], r["utilisateur"]))
+        for i in self.tree.get_children(): self.tree.delete(i)
+        conn=get_conn(); rows=conn.execute("SELECT * FROM stock_journal ORDER BY id DESC LIMIT 50").fetchall(); conn.close()
+        for r in rows: self.tree.insert("","end",values=(r["date_heure"],r["type_produit"],r["produit_nom"],f"{r['quantite']:.2f}",r["action"],r["utilisateur"]))
 
 
-# ------------------------------------------------------------------
-# PRESTATIONS DE SERVICES
-# ------------------------------------------------------------------
 class PrestationFrame(BaseSidebarFrame):
     """Établissement de factures pour les prestations d'infographie/services.
 
@@ -1669,551 +1558,185 @@ def montant_en_lettres(n):
 
 class VenteFrame(BaseSidebarFrame):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Vendre")
-        self.panier = []
+        super().__init__(parent, app, "Vendre"); self.panier=[]; c=self.content
+        tk.Label(c,text="Ventes",font=FONT_TITLE,bg=COLOR_BG,fg=COLOR_PRIMARY_DARK).pack(anchor="w")
+        if is_journee_cloturee(): tk.Label(c,text="⚠ La journée est clôturée : aucune vente n'est possible.",font=FONT_BOLD,bg=COLOR_BG,fg=COLOR_DANGER).pack(anchor="w",pady=10)
+        top=tk.Frame(c,bg=COLOR_BG); top.pack(fill="both",expand=True)
+        left=tk.Frame(top,bg="white",padx=20,pady=15,highlightbackground=COLOR_ACCENT,highlightthickness=2); left.pack(side="left",fill="both",expand=True,padx=(0,10))
+        tk.Label(left,text="Saisir la facture",font=FONT_SUBTITLE,bg="white",fg=COLOR_PRIMARY_DARK).grid(row=0,column=0,columnspan=4,pady=(0,10),sticky="w")
+        tk.Label(left,text="Type",bg="white").grid(row=1,column=0,sticky="w",pady=4)
+        self.type_var=tk.StringVar(value=TYPE_LABELS["PSF"]); cb=ttk.Combobox(left,textvariable=self.type_var,state="readonly",width=18,values=[TYPE_LABELS["PSF"],TYPE_LABELS["PF"]]); cb.grid(row=1,column=1,pady=4,padx=(0,8)); cb.bind("<<ComboboxSelected>>",lambda e:self.refresh_produits())
+        tk.Label(left,text="Produit",bg="white").grid(row=2,column=0,sticky="w",pady=4)
+        self.produit_var=tk.StringVar(); self.produit_combo=ttk.Combobox(left,textvariable=self.produit_var,state="readonly",width=18); self.produit_combo.grid(row=2,column=1,pady=4,padx=(0,8)); self.produit_combo.bind("<<ComboboxSelected>>",lambda e:self.update_produit())
+        tk.Label(left,text="Nombre de sacs vendus",bg="white").grid(row=3,column=0,sticky="w",pady=4)
+        self.sacs_var=tk.StringVar(); ent=ttk.Entry(left,textvariable=self.sacs_var,width=20); ent.grid(row=3,column=1,pady=4,padx=(0,8)); ent.bind("<KeyRelease>",lambda e:self.update_calcul_ligne())
+        tk.Label(left,text="Poids d'un sac",bg="white").grid(row=4,column=0,sticky="w",pady=4)
+        self.poids_info=tk.StringVar(value="-"); tk.Label(left,textvariable=self.poids_info,bg="white",font=FONT_BOLD).grid(row=4,column=1,sticky="w")
+        tk.Label(left,text="Quantité correspondante",bg="white").grid(row=5,column=0,sticky="w",pady=4)
+        self.kg_info=tk.StringVar(value="0 Kg"); tk.Label(left,textvariable=self.kg_info,bg="white",font=FONT_BOLD).grid(row=5,column=1,sticky="w")
+        tk.Label(left,text="Prix unitaire / sac",bg="white").grid(row=6,column=0,sticky="w",pady=4)
+        self.prix_info=tk.StringVar(value="0 F CFA"); tk.Label(left,textvariable=self.prix_info,bg="white",font=FONT_BOLD).grid(row=6,column=1,sticky="w")
+        tk.Label(left,text="Montant de la ligne",bg="white").grid(row=7,column=0,sticky="w",pady=4)
+        self.ligne_info=tk.StringVar(value="0 F CFA"); tk.Label(left,textvariable=self.ligne_info,bg="white",font=FONT_BOLD,fg=COLOR_PRIMARY_DARK).grid(row=7,column=1,sticky="w")
+        tk.Label(left,text="Transport à la charge du client",bg="white").grid(row=8,column=0,sticky="w",pady=4)
+        self.transport_var=tk.StringVar(value=""); tr=ttk.Entry(left,textvariable=self.transport_var,width=20); tr.grid(row=8,column=1,pady=4,padx=(0,8)); tr.bind("<KeyRelease>",lambda e:self.actualiser_total())
+        state="disabled" if is_journee_cloturee() else "normal"; bf=tk.Frame(left,bg="white"); bf.grid(row=9,column=0,columnspan=4,pady=12,sticky="w")
+        ttk.Button(bf,text="➕ Ajouter au panier",command=self.ajouter_panier,state=state).pack(side="left",padx=(0,8),ipadx=8); ttk.Button(bf,text="🧾 Enregistrer la facture",style="Primary.TButton",state=state,command=self.apercu_facture).pack(side="left",ipadx=8)
+        tk.Label(left,text="Panier",font=FONT_SUBTITLE,bg="white",fg=COLOR_PRIMARY_DARK).grid(row=10,column=0,columnspan=4,sticky="w",pady=(10,5))
+        self.panier_tree=ttk.Treeview(left,columns=("type","produit","sacs","kg","pu","total"),show="headings",height=6)
+        for c2,t in zip(("type","produit","sacs","kg","pu","total"),("Type","Produit","Sacs","Kg","P.U./sac","Total")): self.panier_tree.heading(c2,text=t); self.panier_tree.column(c2,width=85,anchor="center")
+        self.panier_tree.grid(row=11,column=0,columnspan=4,sticky="nsew"); ttk.Button(left,text="🗑 Retirer la ligne sélectionnée",command=self.retirer_ligne,state=state).grid(row=12,column=0,columnspan=4,pady=8)
+        self.total_live_var=tk.StringVar(value="TOTAL À PAYER : 0 F CFA"); tk.Label(left,textvariable=self.total_live_var,font=("Segoe UI",16,"bold"),bg="white",fg=COLOR_PRIMARY_DARK).grid(row=13,column=0,columnspan=4,sticky="e",pady=(6,4))
+        right=tk.Frame(top,bg="white",padx=20,pady=15,highlightbackground=COLOR_ACCENT,highlightthickness=2,width=320); right.pack(side="left",fill="y")
+        tk.Label(right,text="Informations Client",font=FONT_SUBTITLE,bg="white",fg=COLOR_PRIMARY_DARK).pack(anchor="w",pady=(0,10))
+        tk.Label(right,text="Nom du client *",bg="white").pack(anchor="w"); self.client_nom=tk.StringVar(); ttk.Entry(right,textvariable=self.client_nom,width=30).pack(pady=(2,8))
+        tk.Label(right,text="Téléphone *",bg="white").pack(anchor="w"); self.client_tel=tk.StringVar(); ttk.Entry(right,textvariable=self.client_tel,width=30).pack(pady=(2,8))
+        tk.Label(right,text="Quartier / Adresse",bg="white").pack(anchor="w"); self.client_adr=tk.StringVar(); ttk.Entry(right,textvariable=self.client_adr,width=30).pack(pady=(2,15))
+        self.tva_var=tk.BooleanVar(value=False); tk.Checkbutton(right,text=f"Appliquer la TVA ({int(TVA_TAUX*100)}%)",variable=self.tva_var,command=self.actualiser_total,bg="white",font=FONT_BOLD,fg=COLOR_PRIMARY_DARK,activebackground="white",selectcolor=COLOR_ACCENT,cursor="hand2").pack(anchor="w",pady=(0,10))
+        tk.Label(c,text="Factures enregistrées aujourd'hui",font=FONT_SUBTITLE,bg=COLOR_BG,fg=COLOR_PRIMARY_DARK).pack(anchor="w",pady=(20,5))
+        self.fact_tree=ttk.Treeview(c,columns=("numero","heure","client","total"),show="headings",height=6)
+        for c3,t in zip(("numero","heure","client","total"),("N° Facture","Heure","Client","Total")): self.fact_tree.heading(c3,text=t); self.fact_tree.column(c3,anchor="center")
+        self.fact_tree.pack(fill="x"); self.fact_tree.bind("<Double-1>",self.voir_facture); left.grid_columnconfigure(2,weight=1); left.grid_rowconfigure(11,weight=1); self.refresh_produits(); self.refresh_factures_jour()
 
-        c = self.content
-        tk.Label(c, text="Ventes", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_PRIMARY_DARK).pack(anchor="w")
-
-        if is_journee_cloturee():
-            tk.Label(c, text="⚠ La journée est clôturée : aucune vente n'est possible.", font=FONT_BOLD,
-                     bg=COLOR_BG, fg=COLOR_DANGER).pack(anchor="w", pady=10)
-
-        top = tk.Frame(c, bg=COLOR_BG)
-        top.pack(fill="both", expand=True)
-
-        # --- colonne gauche : saisie de facture + panier + total en temps réel ---
-        left = tk.Frame(top, bg="white", padx=20, pady=15, highlightbackground=COLOR_ACCENT, highlightthickness=2)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        tk.Label(left, text="Saisir la facture", font=FONT_SUBTITLE, bg="white", fg=COLOR_PRIMARY_DARK).grid(
-            row=0, column=0, columnspan=4, pady=(0, 10), sticky="w")
-
-        tk.Label(left, text="Type", bg="white", font=FONT_NORMAL).grid(row=1, column=0, sticky="w", pady=4)
-        self.type_var = tk.StringVar(value=TYPE_LABELS["PSF"])
-        type_combo = ttk.Combobox(left, textvariable=self.type_var, state="readonly", width=18,
-                                   values=[TYPE_LABELS["PSF"], TYPE_LABELS["PF"]])
-        type_combo.grid(row=1, column=1, pady=4, padx=(0, 8))
-        type_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_produits())
-
-        tk.Label(left, text="Produit", bg="white", font=FONT_NORMAL).grid(row=2, column=0, sticky="w", pady=4)
-        self.produit_var = tk.StringVar()
-        self.produit_combo = ttk.Combobox(left, textvariable=self.produit_var, state="readonly", width=18)
-        self.produit_combo.grid(row=2, column=1, pady=4, padx=(0, 8))
-        self.produit_combo.bind("<<ComboboxSelected>>", lambda e: self.update_prix())
-
-        tk.Label(left, text="Quantité (Kg)", bg="white", font=FONT_NORMAL).grid(row=3, column=0, sticky="w", pady=4)
-        self.qte_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.qte_var, width=20).grid(row=3, column=1, pady=4, padx=(0, 8))
-
-        tk.Label(left, text="Prix unitaire", bg="white", font=FONT_NORMAL).grid(row=4, column=0, sticky="w", pady=4)
-        self.prix_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.prix_var, width=20).grid(row=4, column=1, pady=4, padx=(0, 8))
-
-        tk.Label(left, text="Transport à la charge du client", bg="white", font=FONT_NORMAL).grid(
-            row=5, column=0, sticky="w", pady=4)
-        self.transport_var = tk.StringVar(value="")
-        transport_entry = ttk.Entry(left, textvariable=self.transport_var, width=20)
-        transport_entry.grid(row=5, column=1, pady=4, padx=(0, 8))
-        transport_entry.bind("<KeyRelease>", lambda e: self.actualiser_total())
-
-        state = "disabled" if is_journee_cloturee() else "normal"
-        btn_frame = tk.Frame(left, bg="white")
-        btn_frame.grid(row=6, column=0, columnspan=4, pady=12, sticky="w")
-        ttk.Button(btn_frame, text="➕ Ajouter au panier", command=self.ajouter_panier,
-                   state=state).pack(side="left", padx=(0, 8), ipadx=8)
-        ttk.Button(btn_frame, text="🧾 Enregistrer la facture", style="Primary.TButton",
-                   state=state, command=self.apercu_facture).pack(side="left", ipadx=8)
-
-        tk.Label(left, text="Panier", font=FONT_SUBTITLE, bg="white", fg=COLOR_PRIMARY_DARK).grid(
-            row=7, column=0, columnspan=4, sticky="w", pady=(10, 5))
-        self.panier_tree = ttk.Treeview(left, columns=("type", "produit", "qte", "pu", "total"),
-                                        show="headings", height=6)
-        for c2, t in zip(("type", "produit", "qte", "pu", "total"),
-                         ("Type", "Produit", "Qté(Kg)", "P.U.", "Total")):
-            self.panier_tree.heading(c2, text=t)
-            self.panier_tree.column(c2, width=90, anchor="center")
-        self.panier_tree.grid(row=8, column=0, columnspan=4, sticky="nsew")
-
-        ttk.Button(left, text="🗑 Retirer la ligne sélectionnée", command=self.retirer_ligne,
-                   state=state).grid(row=9, column=0, columnspan=4, pady=8)
-
-        self.total_live_var = tk.StringVar(value="TOTAL À PAYER : 0 F CFA")
-        tk.Label(left, textvariable=self.total_live_var, font=("Segoe UI", 16, "bold"),
-                 bg="white", fg=COLOR_PRIMARY_DARK).grid(row=10, column=0, columnspan=4, sticky="e", pady=(6, 4))
-
-        # --- colonne droite : infos client + TVA ---
-        right = tk.Frame(top, bg="white", padx=20, pady=15, highlightbackground=COLOR_ACCENT,
-                         highlightthickness=2, width=320)
-        right.pack(side="left", fill="y")
-
-        tk.Label(right, text="Informations Client", font=FONT_SUBTITLE, bg="white",
-                 fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(0, 10))
-        tk.Label(right, text="Nom du client *", bg="white", font=FONT_NORMAL).pack(anchor="w")
-        self.client_nom = tk.StringVar()
-        ttk.Entry(right, textvariable=self.client_nom, width=30).pack(pady=(2, 8))
-
-        tk.Label(right, text="Téléphone *", bg="white", font=FONT_NORMAL).pack(anchor="w")
-        self.client_tel = tk.StringVar()
-        ttk.Entry(right, textvariable=self.client_tel, width=30).pack(pady=(2, 8))
-
-        tk.Label(right, text="Quartier / Adresse", bg="white", font=FONT_NORMAL).pack(anchor="w")
-        self.client_adr = tk.StringVar()
-        ttk.Entry(right, textvariable=self.client_adr, width=30).pack(pady=(2, 15))
-
-        self.tva_var = tk.BooleanVar(value=False)
-        tva_check = tk.Checkbutton(right, text=f"Appliquer la TVA ({int(TVA_TAUX*100)}%)", variable=self.tva_var,
-                                   command=self.actualiser_total, bg="white", font=FONT_BOLD,
-                                   fg=COLOR_PRIMARY_DARK, activebackground="white",
-                                   selectcolor=COLOR_ACCENT, cursor="hand2")
-        tva_check.pack(anchor="w", pady=(0, 10))
-
-        tk.Label(right, text="Le quartier/adresse est facultatif.", bg="white",
-                 fg="#777", font=("Segoe UI", 9, "italic")).pack(anchor="w")
-
-        # Liste des factures du jour
-        tk.Label(c, text="Factures enregistrées aujourd'hui", font=FONT_SUBTITLE, bg=COLOR_BG,
-                 fg=COLOR_PRIMARY_DARK).pack(anchor="w", pady=(20, 5))
-        self.fact_tree = ttk.Treeview(c, columns=("numero", "heure", "client", "total"),
-                                      show="headings", height=6)
-        for c3, t in zip(("numero", "heure", "client", "total"),
-                         ("N° Facture", "Heure", "Client", "Total")):
-            self.fact_tree.heading(c3, text=t)
-            self.fact_tree.column(c3, anchor="center")
-        self.fact_tree.pack(fill="x")
-        self.fact_tree.bind("<Double-1>", self.voir_facture)
-
-        left.grid_columnconfigure(2, weight=1)
-        left.grid_rowconfigure(8, weight=1)
-        self.refresh_produits()
-        self.refresh_factures_jour()
-
-    def type_code(self):
-        for k in ["PSF", "PF"]:
-            if TYPE_LABELS[k] == self.type_var.get():
-                return k
-        return "PSF"
-
+    def type_code(self): return "PSF" if self.type_var.get()==TYPE_LABELS["PSF"] else "PF"
     def refresh_produits(self):
-        tc = self.type_code()
-        rows = get_stock(tc)
-        self.produit_combo["values"] = [r["nom"] for r in rows if r["quantite"] > 0]
-
-    def update_prix(self):
-        tc = self.type_code()
-        nom = self.produit_var.get()
-        conn = get_conn()
-        table = TYPES_PRODUITS[tc]
-        row = conn.execute(f"SELECT * FROM {table} WHERE nom=?", (nom,)).fetchone()
-        conn.close()
-        if row and tc in ("PSF", "PF"):
-            self.prix_var.set(str(row["prix_vente"]))
-        else:
-            self.prix_var.set("")
-
+        rows=get_stock(self.type_code()); self.produit_combo["values"]=[r["nom"] for r in rows if r["quantite"]>0 and (r["poids_sac"] or 0)>0]; self.produit_var.set(""); self.poids_info.set("-"); self.prix_info.set("0 F CFA"); self.kg_info.set("0 Kg"); self.ligne_info.set("0 F CFA")
+    def update_produit(self):
+        tc=self.type_code(); nom=self.produit_var.get(); conn=get_conn(); r=conn.execute(f"SELECT * FROM {TYPES_PRODUITS[tc]} WHERE nom=?",(nom,)).fetchone(); conn.close(); self.current_poids=float(r["poids_sac"] or 0) if r else 0; self.current_prix=float(r["prix_vente"] or 0) if r else 0; self.poids_info.set(f"{self.current_poids:g} Kg"); self.prix_info.set(f"{self.current_prix:,.0f} F CFA".replace(","," ")); self.update_calcul_ligne()
+    def update_calcul_ligne(self):
+        try: sacs=float(self.sacs_var.get().replace(",",".") or 0)
+        except ValueError: sacs=0
+        poids=getattr(self,"current_poids",0); prix=getattr(self,"current_prix",0); self.kg_info.set(f"{sacs*poids:g} Kg"); self.ligne_info.set(f"{sacs*prix:,.0f} F CFA".replace(","," "))
     def _transport(self):
-        try:
-            value = float(self.transport_var.get().replace(" ", "").replace(",", ".") or 0)
-            return max(0, value)
-        except ValueError:
-            return 0
-
+        try: return max(0,float(self.transport_var.get().replace(" ","").replace(",",".") or 0))
+        except ValueError: return 0
     def calculer_totaux(self):
-        montant_ht = sum(l["qte"] * l["pu"] for l in self.panier)
-        montant_tva = montant_ht * TVA_TAUX if self.tva_var.get() else 0
-        transport = self._transport()
-        return montant_ht, montant_tva, transport, montant_ht + montant_tva + transport
-
-    def actualiser_total(self):
-        _, _, _, total = self.calculer_totaux()
-        self.total_live_var.set(f"TOTAL À PAYER : {total:,.0f} F CFA".replace(",", " "))
-
+        ht=sum(l["sacs"]*l["pu"] for l in self.panier); tva=ht*TVA_TAUX if self.tva_var.get() else 0; tr=self._transport(); return ht,tva,tr,ht+tva+tr
+    def actualiser_total(self): self.total_live_var.set(f"TOTAL À PAYER : {self.calculer_totaux()[3]:,.0f} F CFA".replace(","," "))
     def ajouter_panier(self):
-        if is_journee_cloturee():
-            messagebox.showerror("Erreur", "La journée est clôturée.")
-            return
-        tc = self.type_code()
-        nom = self.produit_var.get()
-        if not nom:
-            messagebox.showerror("Erreur", "Sélectionnez un produit.")
-            return
-        try:
-            qte = float(self.qte_var.get().replace(",", "."))
-            pu = float(self.prix_var.get().replace(",", "."))
-        except ValueError:
-            messagebox.showerror("Erreur", "Quantité et prix doivent être numériques.")
-            return
-        if qte <= 0:
-            messagebox.showerror("Erreur", "La quantité doit être positive.")
-            return
-
-        conn = get_conn()
-        table = TYPES_PRODUITS[tc]
-        stock_row = conn.execute(f"SELECT quantite FROM {table} WHERE nom=?", (nom,)).fetchone()
-        conn.close()
-        dispo = stock_row["quantite"] if stock_row else 0
-        deja_panier = sum(l["qte"] for l in self.panier if l["nom"] == nom and l["type_code"] == tc)
-        if qte + deja_panier > dispo:
-            messagebox.showerror("Stock insuffisant", f"Stock disponible pour « {nom} » : {dispo} Kg.")
-            return
-
-        self.panier.append({"type_code": tc, "nom": nom, "qte": qte, "pu": pu})
-        self.panier_tree.insert("", "end", values=(TYPE_LABELS[tc], nom, qte, pu, qte * pu))
-        self.qte_var.set("")
-        self.prix_var.set("")
-        self.actualiser_total()
-
+        if is_journee_cloturee(): messagebox.showerror("Erreur","La journée est clôturée."); return
+        tc=self.type_code(); nom=self.produit_var.get()
+        if not nom: messagebox.showerror("Erreur","Sélectionnez un produit."); return
+        try: sacs=float(self.sacs_var.get().replace(",","."))
+        except ValueError: messagebox.showerror("Erreur","Le nombre de sacs doit être numérique."); return
+        if sacs<=0: messagebox.showerror("Erreur","Le nombre de sacs doit être positif."); return
+        conn=get_conn(); r=conn.execute(f"SELECT quantite,poids_sac,prix_vente FROM {TYPES_PRODUITS[tc]} WHERE nom=?",(nom,)).fetchone(); conn.close()
+        if not r or (r["poids_sac"] or 0)<=0: messagebox.showerror("Erreur","Le poids d'un sac n'est pas paramétré pour ce produit."); return
+        poids=float(r["poids_sac"]); pu=float(r["prix_vente"] or 0); kg=sacs*poids; deja=sum(l["kg"] for l in self.panier if l["nom"]==nom and l["type_code"]==tc)
+        if kg+deja>r["quantite"]+1e-9: messagebox.showerror("Stock insuffisant",f"Stock disponible pour « {nom} » : {r['quantite']:.2f} Kg, soit {r['quantite']/poids:.2f} sacs."); return
+        self.panier.append({"type_code":tc,"nom":nom,"sacs":sacs,"poids_sac":poids,"kg":kg,"pu":pu}); self.panier_tree.insert("","end",values=(TYPE_LABELS[tc],nom,f"{sacs:g}",f"{kg:g}",f"{pu:.0f}",f"{sacs*pu:.0f}")); self.sacs_var.set(""); self.update_calcul_ligne(); self.actualiser_total()
     def retirer_ligne(self):
-        sel = self.panier_tree.selection()
-        if not sel:
-            return
-        idx = self.panier_tree.index(sel[0])
-        del self.panier[idx]
-        self.panier_tree.delete(sel[0])
-        self.actualiser_total()
-
+        sel=self.panier_tree.selection()
+        if sel: idx=self.panier_tree.index(sel[0]); del self.panier[idx]; self.panier_tree.delete(sel[0]); self.actualiser_total()
     def apercu_facture(self):
-        if not self.panier:
-            messagebox.showerror("Erreur", "Le panier est vide.")
-            return
-        if not self.client_nom.get().strip() or not self.client_tel.get().strip():
-            messagebox.showerror("Erreur", "Veuillez renseigner le nom et le téléphone du client.")
-            return
-        transport = self._transport()
+        if not self.panier: messagebox.showerror("Erreur","Le panier est vide."); return
+        if not self.client_nom.get().strip() or not self.client_tel.get().strip(): messagebox.showerror("Erreur","Veuillez renseigner le nom et le téléphone du client."); return
         if self.transport_var.get().strip():
-            try:
-                float(self.transport_var.get().replace(" ", "").replace(",", "."))
-            except ValueError:
-                messagebox.showerror("Erreur", "Le montant du transport doit être numérique.")
-                return
-        FacturePreview(self, self.app, self.panier, self.client_nom.get().strip(),
-                       self.client_tel.get().strip(), self.client_adr.get().strip(),
-                       self.tva_var.get(), transport)
-
+            try: float(self.transport_var.get().replace(" ","").replace(",","."))
+            except ValueError: messagebox.showerror("Erreur","Le montant du transport doit être numérique."); return
+        FacturePreview(self,self.app,self.panier,self.client_nom.get().strip(),self.client_tel.get().strip(),self.client_adr.get().strip(),self.tva_var.get(),self._transport())
     def valider_facture(self):
-        self.panier = []
-        for i in self.panier_tree.get_children():
-            self.panier_tree.delete(i)
-        self.client_nom.set("")
-        self.client_tel.set("")
-        self.client_adr.set("")
-        self.transport_var.set("")
-        self.tva_var.set(False)
-        self.refresh_produits()
-        self.refresh_factures_jour()
-        self.actualiser_total()
-
+        self.panier.clear(); [self.panier_tree.delete(i) for i in self.panier_tree.get_children()]; self.client_nom.set(""); self.client_tel.set(""); self.client_adr.set(""); self.transport_var.set(""); self.tva_var.set(False); self.refresh_produits(); self.refresh_factures_jour(); self.actualiser_total()
     def refresh_factures_jour(self):
-        for i in self.fact_tree.get_children():
-            self.fact_tree.delete(i)
-        conn = get_conn()
-        rows = conn.execute("SELECT * FROM factures WHERE date_jour=? ORDER BY id DESC",
-                            (today_str(),)).fetchall()
-        conn.close()
-        for r in rows:
-            heure = r["date_heure"].split(" ")[1] if " " in r["date_heure"] else r["date_heure"]
-            self.fact_tree.insert("", "end", iid=str(r["id"]),
-                                  values=(r["numero"], heure, r["client_nom"], f"{r['total']:.0f}"))
-
-    def voir_facture(self, event):
-        sel = self.fact_tree.selection()
-        if not sel:
-            return
-        show_facture_detail(self.app, int(sel[0]))
+        for i in self.fact_tree.get_children(): self.fact_tree.delete(i)
+        conn=get_conn(); rows=conn.execute("SELECT * FROM factures WHERE date_jour=? ORDER BY id DESC",(today_str(),)).fetchall(); conn.close()
+        for r in rows: self.fact_tree.insert("","end",iid=str(r["id"]),values=(r["numero"],r["date_heure"].split(" ")[1] if " " in r["date_heure"] else r["date_heure"],r["client_nom"],f"{r['total']:.0f}"))
+    def voir_facture(self,event):
+        sel=self.fact_tree.selection()
+        if sel: show_facture_detail(self.app,int(sel[0]))
 
 
 class FacturePreview(tk.Toplevel):
-    def __init__(self, vente_frame, app, panier, nom, tel, adr, tva_active=False, transport=0):
-        super().__init__(vente_frame)
-        self.vente_frame = vente_frame
-        self.app = app
-        self.panier = panier
-        self.nom, self.tel, self.adr = nom, tel, adr
-        self.tva_active = tva_active
-        self.transport = transport
-        self.title("Enregistrer la facture")
-        self.geometry("650x730")
-        self.minsize(650, 730)
-        self.configure(bg="white")
-        self.grab_set()
-        self.build()
-
+    def __init__(self,vente_frame,app,panier,nom,tel,adr,tva_active=False,transport=0):
+        super().__init__(vente_frame); self.vente_frame=vente_frame; self.app=app; self.panier=panier; self.nom,self.tel,self.adr=nom,tel,adr; self.tva_active=tva_active; self.transport=transport; self.title("Enregistrer la facture"); self.geometry("760x730"); self.minsize(760,730); self.configure(bg="white"); self.grab_set(); self.build()
     def build(self):
-        for w in self.winfo_children():
-            w.destroy()
-        logo = load_logo(60)
-        if logo:
-            lbl = tk.Label(self, image=logo, bg="white")
-            lbl.image = logo
-            lbl.pack(pady=(12, 0))
-        else:
-            tk.Label(self, text="AMINA FDS", font=("Segoe UI", 18, "bold"),
-                     fg=COLOR_PRIMARY, bg="white").pack(pady=(15, 0))
-        tk.Label(self, text="Facture", font=FONT_NORMAL, bg="white", fg="#666").pack(pady=(0, 10))
-
-        info = tk.Frame(self, bg="white")
-        info.pack(fill="x", padx=20)
-        tk.Label(info, text=f"Client : {self.nom}", font=FONT_BOLD, bg="white").pack(anchor="w")
-        tk.Label(info, text=f"Téléphone : {self.tel}", bg="white").pack(anchor="w")
-        if self.adr:
-            tk.Label(info, text=f"Adresse/Quartier : {self.adr}", bg="white").pack(anchor="w")
-        tk.Label(info, text=f"Date : {now_str()}", bg="white").pack(anchor="w", pady=(0, 10))
-
-        tree = ttk.Treeview(self, columns=("produit", "qte", "pu", "total"), show="headings", height=7)
-        widths = {"produit": 220, "qte": 100, "pu": 110, "total": 130}
-        for c, t in zip(("produit", "qte", "pu", "total"),
-                        ("Produit", "Qté(Kg)", "P.U.", "Sous-total")):
-            tree.heading(c, text=t)
-            tree.column(c, anchor="center", width=widths[c])
-        tree.pack(fill="both", expand=True, padx=20)
-        montant_ht = 0
-        for l in self.panier:
-            st = l["qte"] * l["pu"]
-            montant_ht += st
-            tree.insert("", "end", values=(l["nom"], l["qte"], l["pu"], f"{st:.0f}"))
-
-        montant_tva = montant_ht * TVA_TAUX if self.tva_active else 0
-        montant_total = montant_ht + montant_tva + self.transport
-
-        totaux = tk.Frame(self, bg="white")
-        totaux.pack(fill="x", padx=20, pady=(10, 0))
-        def total_row(label, value, bold=False):
-            row = tk.Frame(totaux, bg="white")
-            row.pack(fill="x")
-            font = FONT_BOLD if bold else FONT_NORMAL
-            tk.Label(row, text=label, font=font, bg="white").pack(side="left")
-            tk.Label(row, text=f"{value:,.0f} F CFA".replace(",", " "), font=font, bg="white").pack(side="right")
-
-        total_row("Sous-total HT :", montant_ht)
-        if self.tva_active:
-            total_row(f"TVA ({int(TVA_TAUX*100)}%) :", montant_tva)
-        if self.transport:
-            total_row("Transport à la charge du client :", self.transport)
-
-        tk.Label(self, text=f"MONTANT TOTAL À PAYER : {montant_total:,.0f} F CFA".replace(",", " "),
-                 font=("Segoe UI", 14, "bold"), bg="white", fg=COLOR_PRIMARY_DARK).pack(pady=(12, 5))
-        tk.Label(self, text=f"Arrêtée à la somme de {montant_en_lettres(montant_total)} francs CFA.",
-                 font=("Segoe UI", 10, "italic"), bg="white", fg="#444",
-                 wraplength=590, justify="center").pack(padx=20, pady=(0, 12))
-
-        self.montant_ht, self.montant_tva, self.montant_total = montant_ht, montant_tva, montant_total
-
-        btns = tk.Frame(self, bg="white")
-        btns.pack(pady=8)
-        ttk.Button(btns, text="✏ Modifier", command=self.destroy).pack(side="left", padx=10, ipadx=10)
-        ttk.Button(btns, text="✅ Enregistrer définitivement", style="Primary.TButton",
-                   command=self.enregistrer).pack(side="left", padx=10, ipadx=10)
-
+        logo=load_logo(60)
+        if logo: lbl=tk.Label(self,image=logo,bg="white"); lbl.image=logo; lbl.pack(pady=(12,0))
+        else: tk.Label(self,text="AMINA FDS",font=("Segoe UI",18,"bold"),fg=COLOR_PRIMARY,bg="white").pack(pady=(15,0))
+        tk.Label(self,text="Facture",bg="white",fg="#666").pack(pady=(0,10)); info=tk.Frame(self,bg="white"); info.pack(fill="x",padx=20)
+        tk.Label(info,text=f"Client : {self.nom}",font=FONT_BOLD,bg="white").pack(anchor="w"); tk.Label(info,text=f"Téléphone : {self.tel}",bg="white").pack(anchor="w")
+        if self.adr: tk.Label(info,text=f"Adresse/Quartier : {self.adr}",bg="white").pack(anchor="w")
+        tk.Label(info,text=f"Date : {now_str()}",bg="white").pack(anchor="w",pady=(0,10))
+        tree=ttk.Treeview(self,columns=("produit","sacs","kg","pu","total"),show="headings",height=7)
+        for c,t,w in [("produit","Produit",210),("sacs","Sacs",80),("kg","Kg",90),("pu","P.U./sac",110),("total","Sous-total",130)]: tree.heading(c,text=t); tree.column(c,anchor="center",width=w)
+        tree.pack(fill="both",expand=True,padx=20); ht=0
+        for l in self.panier: st=l["sacs"]*l["pu"]; ht+=st; tree.insert("","end",values=(l["nom"],f"{l['sacs']:g}",f"{l['kg']:g}",f"{l['pu']:.0f}",f"{st:.0f}"))
+        tva=ht*TVA_TAUX if self.tva_active else 0; total=ht+tva+self.transport; self.montant_ht,self.montant_tva,self.montant_total=ht,tva,total
+        tot=tk.Frame(self,bg="white"); tot.pack(fill="x",padx=20,pady=(10,0))
+        def row(label,val): r=tk.Frame(tot,bg="white"); r.pack(fill="x"); tk.Label(r,text=label,bg="white").pack(side="left"); tk.Label(r,text=f"{val:,.0f} F CFA".replace(","," "),bg="white").pack(side="right")
+        row("Sous-total HT :",ht)
+        if self.tva_active: row(f"TVA ({int(TVA_TAUX*100)}%) :",tva)
+        if self.transport: row("Transport à la charge du client :",self.transport)
+        tk.Label(self,text=f"MONTANT TOTAL À PAYER : {total:,.0f} F CFA".replace(","," "),font=("Segoe UI",14,"bold"),bg="white",fg=COLOR_PRIMARY_DARK).pack(pady=(12,5)); tk.Label(self,text=f"Arrêtée à la somme de {montant_en_lettres(total)} francs CFA.",font=("Segoe UI",10,"italic"),bg="white",fg="#444",wraplength=680,justify="center").pack(padx=20,pady=(0,12))
+        b=tk.Frame(self,bg="white"); b.pack(pady=8); ttk.Button(b,text="✏ Modifier",command=self.destroy).pack(side="left",padx=10,ipadx=10); ttk.Button(b,text="✅ Enregistrer définitivement",style="Primary.TButton",command=self.enregistrer).pack(side="left",padx=10,ipadx=10)
     def enregistrer(self):
-        if is_journee_cloturee():
-            messagebox.showerror("Erreur", "La journée est clôturée.")
-            self.destroy()
-            return
-        numero = generate_numero_facture()
-        conn = get_conn()
-        cur = conn.execute("""INSERT INTO factures
-            (numero, date_heure, date_jour, client_nom, client_tel, client_adresse,
-             total, utilisateur, modifiee, tva_active, montant_ht, montant_tva, transport)
-            VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)""",
-            (numero, now_str(), today_str(), self.nom, self.tel, self.adr, self.montant_total,
-             self.app.session["pseudo"], 1 if self.tva_active else 0,
-             self.montant_ht, self.montant_tva, self.transport))
-        facture_id = cur.lastrowid
+        if is_journee_cloturee(): messagebox.showerror("Erreur","La journée est clôturée."); self.destroy(); return
+        numero=generate_numero_facture(); conn=get_conn(); cur=conn.execute("""INSERT INTO factures (numero,date_heure,date_jour,client_nom,client_tel,client_adresse,total,utilisateur,modifiee,tva_active,montant_ht,montant_tva,transport) VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)""",(numero,now_str(),today_str(),self.nom,self.tel,self.adr,self.montant_total,self.app.session["pseudo"],1 if self.tva_active else 0,self.montant_ht,self.montant_tva,self.transport)); fid=cur.lastrowid
         for l in self.panier:
-            conn.execute("""INSERT INTO facture_lignes
-                (facture_id, type_produit, produit_nom, quantite, prix_unitaire, sous_total)
-                VALUES (?,?,?,?,?,?)""",
-                (facture_id, TYPE_LABELS[l["type_code"]], l["nom"], l["qte"], l["pu"], l["qte"] * l["pu"]))
-            table = TYPES_PRODUITS[l["type_code"]]
-            conn.execute(f"UPDATE {table} SET quantite = quantite - ? WHERE nom=?", (l["qte"], l["nom"]))
-        conn.commit()
-        conn.close()
-        for l in self.panier:
-            log_mouvement(TYPE_LABELS[l["type_code"]], l["nom"], -l["qte"],
-                          f"Vente (facture {numero})", self.app.session["pseudo"])
-
-        messagebox.showinfo("Succès",
-                            f"Facture {numero} enregistrée avec succès.\n"
-                            f"Montant total : {self.montant_total:,.0f} F CFA".replace(",", " "))
-        self.vente_frame.valider_facture()
-        self.destroy()
+            st=l["sacs"]*l["pu"]; conn.execute("""INSERT INTO facture_lignes (facture_id,type_produit,produit_nom,quantite,nombre_sacs,poids_sac,prix_unitaire,sous_total) VALUES (?,?,?,?,?,?,?,?)""",(fid,TYPE_LABELS[l["type_code"]],l["nom"],l["kg"],l["sacs"],l["poids_sac"],l["pu"],st)); conn.execute(f"UPDATE {TYPES_PRODUITS[l['type_code']]} SET quantite=quantite-? WHERE nom=?",(l["kg"],l["nom"]))
+        conn.commit(); conn.close()
+        for l in self.panier: log_mouvement(TYPE_LABELS[l["type_code"]],l["nom"],-l["kg"],f"Vente {l['sacs']:g} sacs (facture {numero})",self.app.session["pseudo"])
+        messagebox.showinfo("Succès", f"Facture {numero} enregistrée avec succès.\nMontant total : {self.montant_total:,.0f} F CFA".replace(",", " ")); self.vente_frame.valider_facture(); self.destroy()
 
 
 def show_facture_detail(app, facture_id, allow_edit=False):
-    conn = get_conn()
-    facture = conn.execute("SELECT * FROM factures WHERE id=?", (facture_id,)).fetchone()
-    lignes = conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?", (facture_id,)).fetchall()
-    conn.close()
-    if not facture:
-        return
-
-    top = tk.Toplevel(app)
-    top.title(f"Facture {facture['numero']}")
-    top.geometry("650x730")
-    top.minsize(650, 730)
-    top.configure(bg="white")
-    top.grab_set()
-
-    logo = load_logo(55)
-    if logo:
-        lbl = tk.Label(top, image=logo, bg="white")
-        lbl.image = logo
-        lbl.pack(pady=(12, 0))
-    else:
-        tk.Label(top, text="AMINA FDS", font=("Segoe UI", 18, "bold"),
-                 fg=COLOR_PRIMARY, bg="white").pack(pady=(15, 0))
-    tk.Label(top, text=f"Facture N° {facture['numero']}" + ("  (MODIFIÉE)" if facture["modifiee"] else ""),
-             font=FONT_BOLD, bg="white",
-             fg=COLOR_DANGER if facture["modifiee"] else COLOR_PRIMARY_DARK).pack(pady=(0, 10))
-
-    info = tk.Frame(top, bg="white")
-    info.pack(fill="x", padx=20)
-    tk.Label(info, text=f"Client : {facture['client_nom']}", font=FONT_BOLD, bg="white").pack(anchor="w")
-    tk.Label(info, text=f"Téléphone : {facture['client_tel']}", bg="white").pack(anchor="w")
-    if facture["client_adresse"]:
-        tk.Label(info, text=f"Adresse/Quartier : {facture['client_adresse']}", bg="white").pack(anchor="w")
-    tk.Label(info, text=f"Date : {facture['date_heure']}", bg="white").pack(anchor="w")
-    tk.Label(info, text=f"Enregistrée par : {facture['utilisateur']}", bg="white").pack(anchor="w", pady=(0, 10))
-
-    tree = ttk.Treeview(top, columns=("produit", "qte", "pu", "total"), show="headings", height=7)
-    widths = {"produit": 220, "qte": 100, "pu": 110, "total": 130}
-    for c, t in zip(("produit", "qte", "pu", "total"),
-                    ("Produit", "Qté(Kg)", "P.U.", "Sous-total")):
-        tree.heading(c, text=t)
-        tree.column(c, anchor="center", width=widths[c])
-    tree.pack(fill="both", expand=True, padx=20)
+    conn=get_conn(); facture=conn.execute("SELECT * FROM factures WHERE id=?",(facture_id,)).fetchone(); lignes=conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?",(facture_id,)).fetchall(); conn.close()
+    if not facture: return
+    top=tk.Toplevel(app); top.title(f"Facture {facture['numero']}"); top.geometry("760x730"); top.minsize(760,730); top.configure(bg="white"); top.grab_set()
+    logo=load_logo(55)
+    if logo: lbl=tk.Label(top,image=logo,bg="white"); lbl.image=logo; lbl.pack(pady=(12,0))
+    tk.Label(top,text=f"Facture N° {facture['numero']}"+("  (MODIFIÉE)" if facture["modifiee"] else ""),font=FONT_BOLD,bg="white",fg=COLOR_DANGER if facture["modifiee"] else COLOR_PRIMARY_DARK).pack(pady=(0,10))
+    info=tk.Frame(top,bg="white"); info.pack(fill="x",padx=20); tk.Label(info,text=f"Client : {facture['client_nom']}",font=FONT_BOLD,bg="white").pack(anchor="w"); tk.Label(info,text=f"Téléphone : {facture['client_tel']}",bg="white").pack(anchor="w")
+    if facture["client_adresse"]: tk.Label(info,text=f"Adresse/Quartier : {facture['client_adresse']}",bg="white").pack(anchor="w")
+    tk.Label(info,text=f"Date : {facture['date_heure']}",bg="white").pack(anchor="w"); tk.Label(info,text=f"Enregistrée par : {facture['utilisateur']}",bg="white").pack(anchor="w",pady=(0,10))
+    tree=ttk.Treeview(top,columns=("produit","sacs","kg","pu","total"),show="headings",height=7)
+    for c,t,w in [("produit","Produit",210),("sacs","Sacs",80),("kg","Kg",90),("pu","P.U./sac",110),("total","Sous-total",130)]: tree.heading(c,text=t); tree.column(c,anchor="center",width=w)
+    tree.pack(fill="both",expand=True,padx=20)
     for l in lignes:
-        tree.insert("", "end", values=(l["produit_nom"], l["quantite"], l["prix_unitaire"],
-                                       f"{l['sous_total']:.0f}"))
-
-    totaux = tk.Frame(top, bg="white")
-    totaux.pack(fill="x", padx=20, pady=(10, 0))
-    try:
-        tva_active = bool(facture["tva_active"])
-        montant_ht = facture["montant_ht"] or 0
-        montant_tva = facture["montant_tva"] or 0
-        transport = facture["transport"] or 0
-    except (IndexError, KeyError):
-        tva_active, montant_ht, montant_tva, transport = False, facture["total"] or 0, 0, 0
-
-    def total_row(label, value):
-        row = tk.Frame(totaux, bg="white")
-        row.pack(fill="x")
-        tk.Label(row, text=label, bg="white").pack(side="left")
-        tk.Label(row, text=f"{value:,.0f} F CFA".replace(",", " "), bg="white").pack(side="right")
-
-    if montant_ht:
-        total_row("Sous-total HT :", montant_ht)
-    if tva_active:
-        total_row(f"TVA ({int(TVA_TAUX*100)}%) :", montant_tva)
-    if transport:
-        total_row("Transport à la charge du client :", transport)
-
-    total = facture["total"] or 0
-    tk.Label(top, text=f"MONTANT TOTAL À PAYER : {total:,.0f} F CFA".replace(",", " "),
-             font=("Segoe UI", 14, "bold"), bg="white", fg=COLOR_PRIMARY_DARK).pack(pady=(14, 5))
-    tk.Label(top, text=f"Arrêtée à la somme de {montant_en_lettres(total)} francs CFA.",
-             font=("Segoe UI", 10, "italic"), bg="white", fg="#444",
-             wraplength=590, justify="center").pack(padx=20, pady=(0, 12))
-
-    if allow_edit and app.session["level"] == 2:
-        ttk.Button(top, text="✏ Modifier cette facture (Niveau 2)",
-                   command=lambda: [top.destroy(), EditFactureWindow(app, facture_id)]).pack(pady=5)
+        sacs=l["nombre_sacs"] or ((l["quantite"]/(l["poids_sac"] or 1)) if l["poids_sac"] else 0); tree.insert("","end",values=(l["produit_nom"],f"{sacs:g}",f"{l['quantite']:g}",f"{l['prix_unitaire']:.0f}",f"{l['sous_total']:.0f}"))
+    ht=facture["montant_ht"] or 0; tva=facture["montant_tva"] or 0; tr=facture["transport"] or 0; totals=tk.Frame(top,bg="white"); totals.pack(fill="x",padx=20,pady=(10,0))
+    def rr(label,val): r=tk.Frame(totals,bg="white"); r.pack(fill="x"); tk.Label(r,text=label,bg="white").pack(side="left"); tk.Label(r,text=f"{val:,.0f} F CFA".replace(","," "),bg="white").pack(side="right")
+    if ht: rr("Sous-total HT :",ht)
+    if facture["tva_active"]: rr(f"TVA ({int(TVA_TAUX*100)}%) :",tva)
+    if tr: rr("Transport à la charge du client :",tr)
+    total=facture["total"] or 0; tk.Label(top,text=f"MONTANT TOTAL À PAYER : {total:,.0f} F CFA".replace(","," "),font=("Segoe UI",14,"bold"),bg="white",fg=COLOR_PRIMARY_DARK).pack(pady=(14,5)); tk.Label(top,text=f"Arrêtée à la somme de {montant_en_lettres(total)} francs CFA.",font=("Segoe UI",10,"italic"),bg="white",fg="#444",wraplength=680,justify="center").pack(padx=20,pady=(0,12))
+    if allow_edit and app.session["level"]==2: ttk.Button(top,text="✏ Modifier cette facture (Niveau 2)",command=lambda:[top.destroy(),EditFactureWindow(app,facture_id)]).pack(pady=5)
 
 
 class EditFactureWindow(tk.Toplevel):
-    """Modification d'une facture déjà enregistrée — réservé au chef (niveau 2)."""
-    def __init__(self, app, facture_id):
-        super().__init__(app)
-        self.app = app
-        self.facture_id = facture_id
-        self.title("Modifier la facture")
-        self.geometry("640x580")
-        self.minsize(640, 580)
-        self.configure(bg="white")
-        self.grab_set()
-        self.load_data()
-        self.build()
-
+    def __init__(self,app,facture_id):
+        super().__init__(app); self.app=app; self.facture_id=facture_id; self.title("Modifier la facture"); self.geometry("720x580"); self.configure(bg="white"); self.grab_set(); self.load_data(); self.build()
     def load_data(self):
-        conn = get_conn()
-        self.facture = conn.execute("SELECT * FROM factures WHERE id=?", (self.facture_id,)).fetchone()
-        self.lignes = [dict(r) for r in conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?", (self.facture_id,)).fetchall()]
-        conn.close()
-
+        conn=get_conn(); self.facture=conn.execute("SELECT * FROM factures WHERE id=?",(self.facture_id,)).fetchone(); self.lignes=[dict(r) for r in conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?",(self.facture_id,)).fetchall()]; conn.close()
     def build(self):
-        for w in self.winfo_children():
-            w.destroy()
-        tk.Label(self, text=f"Modification — Facture {self.facture['numero']}", font=FONT_SUBTITLE, bg="white", fg=COLOR_PRIMARY_DARK).pack(pady=10)
-
-        self.tree = ttk.Treeview(self, columns=("produit", "qte", "pu", "total"), show="headings", height=8)
-        widths = {"produit": 200, "qte": 100, "pu": 110, "total": 130}
-        for c, t in zip(("produit", "qte", "pu", "total"), ("Produit", "Qté(Kg)", "P.U.", "Sous-total")):
-            self.tree.heading(c, text=t)
-            self.tree.column(c, anchor="center", width=widths[c])
-        self.tree.pack(fill="both", expand=True, padx=20)
-        for i, l in enumerate(self.lignes):
-            self.tree.insert("", "end", iid=str(i), values=(l["produit_nom"], l["quantite"], l["prix_unitaire"], f"{l['sous_total']:.0f}"))
-
-        edit_frame = tk.Frame(self, bg="white")
-        edit_frame.pack(pady=10)
-        tk.Label(edit_frame, text="Nouvelle quantité (Kg) :", bg="white").grid(row=0, column=0, padx=5)
-        self.qte_var = tk.StringVar()
-        ttk.Entry(edit_frame, textvariable=self.qte_var, width=10).grid(row=0, column=1, padx=5)
-        ttk.Button(edit_frame, text="Appliquer à la ligne sélectionnée", command=self.modifier_ligne).grid(row=0, column=2, padx=10)
-
-        ttk.Button(self, text="💾 Enregistrer les modifications", style="Primary.TButton",
-                   command=self.enregistrer).pack(pady=15, ipadx=10)
-
+        tk.Label(self,text=f"Modification — Facture {self.facture['numero']}",font=FONT_SUBTITLE,bg="white",fg=COLOR_PRIMARY_DARK).pack(pady=10); self.tree=ttk.Treeview(self,columns=("produit","sacs","kg","pu","total"),show="headings",height=8)
+        for c,t,w in [("produit","Produit",190),("sacs","Sacs",80),("kg","Kg",90),("pu","P.U./sac",110),("total","Sous-total",120)]: self.tree.heading(c,text=t); self.tree.column(c,anchor="center",width=w)
+        self.tree.pack(fill="both",expand=True,padx=20)
+        for i,l in enumerate(self.lignes):
+            sacs=l.get("nombre_sacs") or ((l["quantite"]/(l.get("poids_sac") or 1)) if l.get("poids_sac") else 0); self.tree.insert("","end",iid=str(i),values=(l["produit_nom"],f"{sacs:g}",f"{l['quantite']:g}",f"{l['prix_unitaire']:.0f}",f"{l['sous_total']:.0f}"))
+        f=tk.Frame(self,bg="white"); f.pack(pady=10); tk.Label(f,text="Nouveau nombre de sacs :",bg="white").grid(row=0,column=0,padx=5); self.sacs_var=tk.StringVar(); ttk.Entry(f,textvariable=self.sacs_var,width=10).grid(row=0,column=1,padx=5); ttk.Button(f,text="Appliquer à la ligne sélectionnée",command=self.modifier_ligne).grid(row=0,column=2,padx=10); ttk.Button(self,text="💾 Enregistrer les modifications",style="Primary.TButton",command=self.enregistrer).pack(pady=15,ipadx=10)
     def modifier_ligne(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showerror("Erreur", "Sélectionnez une ligne.")
-            return
-        try:
-            new_qte = float(self.qte_var.get().replace(",", "."))
-        except ValueError:
-            messagebox.showerror("Erreur", "Quantité invalide.")
-            return
-        idx = int(sel[0])
-        self.lignes[idx]["quantite"] = new_qte
-        self.lignes[idx]["sous_total"] = new_qte * self.lignes[idx]["prix_unitaire"]
-        self.tree.item(sel[0], values=(self.lignes[idx]["produit_nom"], new_qte, self.lignes[idx]["prix_unitaire"], f"{self.lignes[idx]['sous_total']:.0f}"))
-
+        sel=self.tree.selection()
+        if not sel: messagebox.showerror("Erreur","Sélectionnez une ligne."); return
+        try: sacs=float(self.sacs_var.get().replace(",","."))
+        except ValueError: messagebox.showerror("Erreur","Nombre de sacs invalide."); return
+        if sacs<=0: messagebox.showerror("Erreur","Le nombre de sacs doit être positif."); return
+        i=int(sel[0]); l=self.lignes[i]; poids=l.get("poids_sac") or 0
+        if not poids:
+            tc=next((k for k,v in TYPE_LABELS.items() if v==l["type_produit"]),None); conn=get_conn(); r=conn.execute(f"SELECT poids_sac FROM {TYPES_PRODUITS[tc]} WHERE nom=?",(l["produit_nom"],)).fetchone() if tc else None; conn.close(); poids=(r["poids_sac"] if r else 0) or 0
+        if poids<=0: messagebox.showerror("Erreur","Poids de sac non paramétré pour ce produit."); return
+        l["nombre_sacs"]=sacs; l["poids_sac"]=poids; l["quantite"]=sacs*poids; l["sous_total"]=sacs*l["prix_unitaire"]; self.tree.item(sel[0],values=(l["produit_nom"],f"{sacs:g}",f"{l['quantite']:g}",f"{l['prix_unitaire']:.0f}",f"{l['sous_total']:.0f}"))
     def enregistrer(self):
-        conn = get_conn()
-        # Remettre en stock les anciennes quantités puis retirer les nouvelles
-        old_lignes = conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?", (self.facture_id,)).fetchall()
-        for ol in old_lignes:
-            for tc, table in TYPES_PRODUITS.items():
-                conn.execute(f"UPDATE {table} SET quantite = quantite + ? WHERE nom=?", (ol["quantite"], ol["produit_nom"]))
-        conn.execute("DELETE FROM facture_lignes WHERE facture_id=?", (self.facture_id,))
-
-        montant_ht = 0
+        conn=get_conn(); old=conn.execute("SELECT * FROM facture_lignes WHERE facture_id=?",(self.facture_id,)).fetchall()
+        for ol in old:
+            for tc,table in TYPES_PRODUITS.items(): conn.execute(f"UPDATE {table} SET quantite=quantite+? WHERE nom=?",(ol["quantite"],ol["produit_nom"]))
+        conn.execute("DELETE FROM facture_lignes WHERE facture_id=?",(self.facture_id,)); ht=0
         for l in self.lignes:
-            montant_ht += l["quantite"] * l["prix_unitaire"]
-            conn.execute("""INSERT INTO facture_lignes (facture_id, type_produit, produit_nom, quantite, prix_unitaire, sous_total)
-                            VALUES (?,?,?,?,?,?)""",
-                        (self.facture_id, l["type_produit"], l["produit_nom"], l["quantite"], l["prix_unitaire"], l["quantite"] * l["prix_unitaire"]))
-            for tc, table in TYPES_PRODUITS.items():
-                conn.execute(f"UPDATE {table} SET quantite = quantite - ? WHERE nom=?", (l["quantite"], l["produit_nom"]))
-
-        tva_active = bool(self.facture["tva_active"]) if "tva_active" in self.facture.keys() else False
-        montant_tva = montant_ht * TVA_TAUX if tva_active else 0
-        total = montant_ht + montant_tva
-
-        conn.execute("UPDATE factures SET total=?, montant_ht=?, montant_tva=?, modifiee=1 WHERE id=?",
-                     (total, montant_ht, montant_tva, self.facture_id))
-        conn.commit()
-        conn.close()
-        log_mouvement("Facture", self.facture["numero"], 0, "Modification de facture", self.app.session["pseudo"])
-        messagebox.showinfo("Succès", "Facture modifiée avec succès.")
-        self.destroy()
+            sacs=l.get("nombre_sacs") or 0; poids=l.get("poids_sac") or 0; st=sacs*l["prix_unitaire"] if sacs else l["sous_total"]; ht+=st; conn.execute("""INSERT INTO facture_lignes (facture_id,type_produit,produit_nom,quantite,nombre_sacs,poids_sac,prix_unitaire,sous_total) VALUES (?,?,?,?,?,?,?,?)""",(self.facture_id,l["type_produit"],l["produit_nom"],l["quantite"],sacs,poids,l["prix_unitaire"],st))
+            for tc,table in TYPES_PRODUITS.items(): conn.execute(f"UPDATE {table} SET quantite=quantite-? WHERE nom=?",(l["quantite"],l["produit_nom"]))
+        tva=ht*TVA_TAUX if bool(self.facture["tva_active"]) else 0; tr=self.facture["transport"] or 0; total=ht+tva+tr; conn.execute("UPDATE factures SET total=?,montant_ht=?,montant_tva=?,modifiee=1 WHERE id=?",(total,ht,tva,self.facture_id)); conn.commit(); conn.close(); log_mouvement("Facture",self.facture["numero"],0,"Modification de facture",self.app.session["pseudo"]); messagebox.showinfo("Succès","Facture modifiée avec succès."); self.destroy()
 
 
-# ------------------------------------------------------------------
-# RAPPORTS
-# ------------------------------------------------------------------
 class RapportFrame(BaseSidebarFrame):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Rapports")
@@ -2253,7 +1776,7 @@ class RapportFrame(BaseSidebarFrame):
             "total_ventes": ventes["t"], "nb_factures": ventes["n"],
             "total_prestations": total_prestations, "nb_prestations": nb_prestations,
             "chiffre_affaires": chiffre_affaires,
-            "total_depenses": depenses["t"], "benefice": chiffre_affaires - depenses["t"],
+            "total_depenses": depenses["t"],
             "factures": factures, "depenses": liste_dep
         }
 
@@ -2272,8 +1795,7 @@ class RapportFrame(BaseSidebarFrame):
                             ("Total des ventes", f"{data['total_ventes']:,.0f} F CFA".replace(",", " ")),
                             ("Total des prestations de services", f"{data['total_prestations']:,.0f} F CFA".replace(",", " ")),
                             ("Chiffre d'affaires (ventes + prestations)", f"{data['chiffre_affaires']:,.0f} F CFA".replace(",", " ")),
-                            ("Total des dépenses", f"{data['total_depenses']:,.0f} F CFA".replace(",", " ")),
-                            ("Bénéfice net", f"{data['benefice']:,.0f} F CFA".replace(",", " "))]:
+                            ("Total des dépenses", f"{data['total_depenses']:,.0f} F CFA".replace(",", " "))]:
             row = tk.Frame(stats, bg="white")
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label + " :", font=FONT_NORMAL, bg="white", width=32, anchor="w").pack(side="left")
@@ -2311,8 +1833,7 @@ class RapportFrame(BaseSidebarFrame):
                             ("Total des ventes", f"{data['total_ventes']:.0f} F CFA"),
                             ("Total des prestations de services", f"{data['total_prestations']:.0f} F CFA"),
                             ("Chiffre d'affaires", f"{data['chiffre_affaires']:.0f} F CFA"),
-                            ("Total des dépenses", f"{data['total_depenses']:.0f} F CFA"),
-                            ("Bénéfice net", f"{data['benefice']:.0f} F CFA")]:
+                            ("Total des dépenses", f"{data['total_depenses']:.0f} F CFA")]:
             cvs.drawString(50, y, f"{label} : {val}")
             y -= 18
         y -= 15
@@ -2348,7 +1869,6 @@ class RapportFrame(BaseSidebarFrame):
         ws.append(["Total des prestations de services", data["total_prestations"]])
         ws.append(["Chiffre d'affaires", data["chiffre_affaires"]])
         ws.append(["Total des dépenses", data["total_depenses"]])
-        ws.append(["Bénéfice net", data["benefice"]])
         ws.append([])
         ws.append(["N° Facture", "Client", "Téléphone", "Total"])
         for f in data["factures"]:
@@ -2422,7 +1942,7 @@ class OptionsAvanceesFrame(BaseSidebarFrame):
         for v in self.pwd_vars.values():
             v.set("")
 
-    # ---- Modifier les prix unitaires de vente (produits semi-finis / finis) ----
+    # ---- Modifier les prix unitaires de vente par sac (produits semi-finis / finis) ----
     def build_tab_prix(self, nb):
         tab = tk.Frame(nb, bg="white", padx=20, pady=20)
         nb.add(tab, text="Modifier les prix")
@@ -2615,8 +2135,6 @@ class OptionsAvanceesFrame(BaseSidebarFrame):
         tk.Label(self.periode_result, text=f"Total des prestations de services ({nb_prestations}) : {total_prestations:,.0f} F CFA".replace(",", " "), bg="white").pack(anchor="w")
         tk.Label(self.periode_result, text=f"Chiffre d'affaires : {chiffre_affaires:,.0f} F CFA".replace(",", " "), font=FONT_BOLD, bg="white").pack(anchor="w")
         tk.Label(self.periode_result, text=f"Total des dépenses : {depenses['t']:,.0f} F CFA".replace(",", " "), bg="white").pack(anchor="w")
-        tk.Label(self.periode_result, text=f"Bénéfice net : {chiffre_affaires - depenses['t']:,.0f} F CFA".replace(",", " "),
-                 font=FONT_BOLD, fg=COLOR_PRIMARY, bg="white").pack(anchor="w", pady=(0, 10))
 
         tree = ttk.Treeview(self.periode_result, columns=("numero", "date", "client", "total"), show="headings", height=8)
         for c, t in zip(("numero", "date", "client", "total"), ("N° Facture", "Date", "Client", "Total")):
